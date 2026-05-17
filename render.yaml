@@ -1,0 +1,20 @@
+# Render service definition (Render reads this on first import).
+# Free tier: app sleeps after 15 minutes of inactivity, wakes in ~30s on next visit.
+services:
+  - type: web
+    name: cineverse
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: TMDB_API_KEY
+        sync: false        # prompts you to enter the value in the Render dashboard
+      - key: OMDB_API_KEY
+        sync: false        # prompts you to enter the value in the Render dashboard
+      - key: SESSION_SECRET
+        generateValue: true # Render auto-generates a strong random value
+      - key: TMDB_REGION
+        value: US

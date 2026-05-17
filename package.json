@@ -1,0 +1,20 @@
+{
+  "name": "cinemaverse",
+  "version": "1.0.0",
+  "description": "Cinematic Noir streaming discovery app — find movies across major streaming services, build a watchlist, browse with parent-guide info.",
+  "main": "server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "cookie-parser": "^1.4.6",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2"
+  }
+}
