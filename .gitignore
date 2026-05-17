@@ -1,0 +1,6 @@
+node_modules/
+.env
+data/users.json
+data/watchlists.json
+*.log
+.DS_Store
