@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#0b0b12">
+<title>CineVerse — movies & series, one watchlist</title>
+<meta name="description" content="Discover movies and TV series across Netflix, Prime Video, Disney+, Max, Hulu, Apple TV+, Peacock and Paramount+. Sort by IMDB rating. One watchlist, every device.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎬</text></svg>">
+<link rel="preconnect" href="https://image.tmdb.org">
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+
+<!-- ============ AUTH SCREEN ============ -->
+<div id="auth-screen" class="auth-screen hidden">
+  <div class="auth-card">
+    <div class="brand-block">
+      <div class="logo">CINE<span>VERSE</span></div>
+      <p class="tagline">Movies &amp; series across every service.<br>One watchlist, any device.</p>
+    </div>
+    <form id="auth-form" autocomplete="on">
+      <div id="auth-name-row" class="field hidden">
+        <label for="auth-name">Name</label>
+        <input id="auth-name" type="text" autocomplete="name" placeholder="Your name">
+      </div>
+      <div class="field">
+        <label for="auth-email">Email</label>
+        <input id="auth-email" type="email" autocomplete="email" required placeholder="you@example.com">
+      </div>
+      <div class="field">
+        <label for="auth-password">Password</label>
+        <input id="auth-password" type="password" autocomplete="current-password" required minlength="6" placeholder="••••••••">
+      </div>
+      <p id="auth-error" class="auth-error hidden"></p>
+      <button type="submit" class="btn-primary" id="auth-submit">Sign in</button>
+    </form>
+    <p class="auth-switch">
+      <span id="auth-switch-label">New here?</span>
+      <a href="#" id="auth-switch-link">Create an account</a>
+    </p>
+  </div>
+</div>
+
+<!-- ============ APP SHELL ============ -->
+<div id="app" class="hidden">
+  <header class="topbar">
+    <a class="logo logo-sm" href="#/home">CINE<span>VERSE</span></a>
+    <nav class="mainnav" id="mainnav">
+      <a href="#/home" data-nav="home">Discover</a>
+      <a href="#/movies" data-nav="movies">Movies</a>
+      <a href="#/series" data-nav="series">Series</a>
+      <a href="#/upcoming" data-nav="upcoming">Coming Soon</a>
+      <a href="#/watchlist" data-nav="watchlist">★ Watchlist</a>
+    </nav>
+    <form id="search-form" class="searchbox" role="search">
+      <input id="search-input" type="search" placeholder="Search movies &amp; series…" aria-label="Search">
+    </form>
+    <div class="userchip">
+      <span id="user-name"></span>
+      <button id="logout-btn" class="btn-ghost" title="Sign out">Sign out</button>
+    </div>
+  </header>
+
+  <main id="view" class="view"></main>
+
+  <footer class="footer">
+    <p>CineVerse · Data from <a href="https://www.themoviedb.org/" target="_blank" rel="noopener">TMDB</a> — this product uses the TMDB API but is not endorsed or certified by TMDB. Ratings supplemented by OMDb.</p>
+  </footer>
+</div>
+
+<div id="toast" class="toast hidden"></div>
+
+<script src="/app.js"></script>
+</body>
+</html>
