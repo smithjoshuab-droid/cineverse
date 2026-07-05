@@ -101,35 +101,43 @@ app.get('/api/genres', wrap(async (req, res) => {
 
 app.get('/api/browse', wrap(async (req, res) => {
   const { type = 'movie', service = '', genre = '', sort = 'popularity', page = 1 } = req.query;
-  res.json(await tmdb.discover({
+  const data = await tmdb.discover({
     type: type === 'tv' ? 'tv' : 'movie',
     service, genre, sort,
     page: Math.max(1, parseInt(page, 10) || 1)
-  }));
+  });
+  await enrichWithImdb(data.results);
+  if (sort === 'rating') {
+    data.results.sort((a, b) => (b.imdbRating ?? b.rating ?? 0) - (a.imdbRating ?? a.rating ?? 0));
+  }
+  res.json(data);
 }));
 
 app.get('/api/trending', wrap(async (req, res) => {
   const type = ['movie', 'tv', 'all'].includes(req.query.type) ? req.query.type : 'all';
-  res.json(await tmdb.trending(type));
+  res.json(await enrichWithImdb(await tmdb.trending(type)));
 }));
 
 app.get('/api/upcoming', wrap(async (req, res) => {
   const type = req.query.type === 'tv' ? 'tv' : 'movie';
-  res.json(await tmdb.upcoming(type));
+  res.json(await enrichWithImdb(await tmdb.upcoming(type)));
 }));
 
 app.get('/api/search', wrap(async (req, res) => {
   const q = String(req.query.q || '').trim();
   if (!q) return res.json({ results: [] });
-  res.json(await tmdb.search(q, parseInt(req.query.page, 10) || 1));
+  const data = await tmdb.search(q, parseInt(req.query.page, 10) || 1);
+  await enrichWithImdb(data.results);
+  res.json(data);
 }));
 
-// IMDb rating via OMDb (cached; quota-friendly), falls back to null.
+// IMDb rating via OMDb (cached 24h; quota-friendly), falls back to null.
+const OMDB_TTL = 24 * 60 * 60 * 1000; // ratings move slowly — long cache saves daily quota
 const omdbCache = new Map();
 async function imdbRating(imdbId) {
   if (!OMDB_KEY || !imdbId) return null;
   const hit = omdbCache.get(imdbId);
-  if (hit && Date.now() - hit.at < 10 * 60 * 1000) return hit.val;
+  if (hit && Date.now() - hit.at < OMDB_TTL) return hit.val;
   try {
     const res = await fetch(`https://www.omdbapi.com/?apikey=${OMDB_KEY}&i=${imdbId}`);
     const data = await res.json();
@@ -139,6 +147,22 @@ async function imdbRating(imdbId) {
     omdbCache.set(imdbId, { at: Date.now(), val });
     return val;
   } catch { return null; }
+}
+
+// Attach real IMDb ratings to a list of titles (small batches; falls back to TMDB score).
+async function enrichWithImdb(items) {
+  if (!OMDB_KEY || !Array.isArray(items) || !items.length) return items;
+  const CHUNK = 8;
+  for (let i = 0; i < items.length; i += CHUNK) {
+    await Promise.all(items.slice(i, i + CHUNK).map(async item => {
+      try {
+        const imdbId = await tmdb.imdbIdFor(item.mediaType, item.id);
+        const imdb = await imdbRating(imdbId);
+        if (imdb && imdb.rating) item.imdbRating = imdb.rating;
+      } catch { /* keep TMDB rating */ }
+    }));
+  }
+  return items;
 }
 
 app.get('/api/title/:type/:id', wrap(async (req, res) => {
