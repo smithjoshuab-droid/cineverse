@@ -119,18 +119,20 @@ async function toggleWatch(item, btn) {
 function cardHTML(x) {
   const key = `${x.mediaType}:${x.id}`;
   const on = state.watchKeys.has(key);
+  const score = x.imdbRating != null ? x.imdbRating : x.rating;
+  const isImdb = x.imdbRating != null;
   const poster = x.poster
     ? `<img class="poster" loading="lazy" src="${IMG}/w342${x.poster}" alt="${esc(x.title)} poster">`
     : `<div class="noposter">🎬</div>`;
   return `<div class="card" data-key="${key}">
     <span class="badge-type">${x.mediaType === 'tv' ? 'Series' : 'Movie'}</span>
     <button class="star ${on ? 'on' : ''}" title="${on ? 'Remove from' : 'Add to'} watchlist"
-      data-item='${esc(JSON.stringify({ id: x.id, mediaType: x.mediaType, title: x.title, poster: x.poster, rating: x.rating, year: x.year }))}'>${on ? '★' : '☆'}</button>
+      data-item='${esc(JSON.stringify({ id: x.id, mediaType: x.mediaType, title: x.title, poster: x.poster, rating: score, year: x.year }))}'>${on ? '★' : '☆'}</button>
     ${poster}
     <div class="meta">
       <p class="title">${esc(x.title)}</p>
       <div class="sub">
-        <span class="badge-rating">★ ${x.rating ? x.rating.toFixed(1) : '–'}</span>
+        <span class="badge-rating" title="${isImdb ? 'IMDb rating' : 'TMDB rating'}">★ ${score ? Number(score).toFixed(1) : '–'}${isImdb ? '<small class="src-imdb"> IMDb</small>' : ''}</span>
         <span>${esc(x.year || '')}</span>
       </div>
     </div>
