@@ -1,7 +1,7 @@
 {
-  "name": "cinemaverse",
-  "version": "1.0.0",
-  "description": "Cinematic Noir streaming discovery app — find movies across major streaming services, build a watchlist, browse with parent-guide info.",
+  "name": "cineverse",
+  "version": "2.0.0",
+  "description": "Cinematic Noir streaming discovery app — movies & TV series across major streaming services, watchlist sync, sortable by type, service, and IMDB rating.",
   "main": "server.js",
   "type": "commonjs",
   "scripts": {

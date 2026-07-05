@@ -1,31 +1,32 @@
-# CinemaVerse
+# CineVerse
 
-A streaming-discovery web app. One watchlist across every major service, filtered
-by genre, sorted by rating, with parent-guide info on every movie.
+A streaming-discovery web app for **movies and TV series**. One watchlist across every
+major service, filterable by service and genre, sortable by IMDB rating — synced to
+any device you sign in from.
 
 ![Cinematic Noir theme](https://img.shields.io/badge/theme-cinematic_noir-8b5cf6) ![Node 18+](https://img.shields.io/badge/node-%E2%89%A518-success)
 
 ## What it does
 
+- **Movies AND series** — dedicated Movies and Series browse pages, plus mixed search and trending rows.
 - **Sign up & sign in** — bcrypt-hashed passwords, signed-cookie sessions, file-backed user store.
-- **Browse movies** across Netflix, Prime Video, Disney+, Max, Hulu, Apple TV+, Peacock, and Paramount+.
-- **Filter by streaming service** (chips along the top of Discover).
-- **Filter by genre** (Action, Drama, Horror, Sci-Fi, Animation, Documentary, …).
-- **Sort by IMDB-style rating, popularity, release date, or A–Z title**.
-- **Coming Soon** — TMDB's official upcoming feed for your region.
-- **Leaving Soon** — older catalog titles still on a service (see [Limitations](#limitations) — TMDB doesn't expose contractual leave dates).
-- **Star ★ to add to your watchlist** — works from grids, search results, the watchlist page, and the movie detail page.
-- **Movie details** — poster, backdrop, overview, cast, where to watch, trailer, parent guide.
+- **Browse across** Netflix, Prime Video, Disney+, Max, Hulu, Apple TV+, Peacock, and Paramount+.
+- **Filter by streaming service** (chips along the top) and **by genre**.
+- **Sort by IMDB rating, popularity, release date, or A–Z** on every browse page.
+- **Watchlist sorting** — by type (movies/series), streaming service (grouped), IMDB rating, title, year, or date added.
+- **Coming Soon** — upcoming movies and series for your region.
+- **Star ★ to add to your watchlist** — from grids, search results, and detail pages. Syncs everywhere.
+- **Detail pages** — poster, backdrop, overview, cast, where to watch, trailer, certification + parent-guide info, real IMDb rating (via OMDb) with IMDb deep link.
 
 ## Setup
 
 ### 1. Get a free TMDB API key
 
-Movie data comes from [The Movie Database](https://www.themoviedb.org/) (free for personal use).
-
 1. Make a free TMDB account → https://www.themoviedb.org/signup
-2. Go to **Settings → API** → request an API key (the "Developer" tier is instant).
-3. Copy your **API Read Access Token (v4)** _or_ your **API Key (v3 auth)**. Either works.
+2. **Settings → API** → request a key (the "Developer" tier is instant).
+3. Copy your **API Read Access Token (v4)** _or_ **API Key (v3)**. Either works — auto-detected.
+
+Optionally grab a free OMDb key (https://www.omdbapi.com/apikey.aspx) for official IMDb ratings on detail pages; without it the app shows TMDB scores.
 
 ### 2. Install and run
 
@@ -37,18 +38,17 @@ npm install
 npm start
 ```
 
-Then open **http://localhost:3000**.
+Then open **http://localhost:3000**. First time? Click **Create an account**.
 
-First time? Click **Create an account** in the auth card.
+### 3. Environment variables
 
-### 3. Optional environment variables
-
-| Variable           | Default      | Notes                                                                          |
-|--------------------|--------------|--------------------------------------------------------------------------------|
-| `TMDB_API_KEY`     | _required_   | v3 key (32 chars) or v4 read access token (long JWT). Auto-detected.           |
-| `SESSION_SECRET`   | _generated_  | Set this to keep sessions valid across server restarts.                        |
-| `PORT`             | `3000`       | HTTP port.                                                                     |
-| `TMDB_REGION`      | `US`         | ISO country code for streaming-provider availability.                          |
+| Variable         | Default     | Notes                                                                 |
+|------------------|-------------|-----------------------------------------------------------------------|
+| `TMDB_API_KEY`   | _required_  | v3 key (32 chars) or v4 read access token (JWT). Auto-detected.       |
+| `OMDB_API_KEY`   | _optional_  | Enables real IMDb ratings on detail pages.                            |
+| `SESSION_SECRET` | _generated_ | Set to keep sessions valid across restarts.                           |
+| `PORT`           | `3000`      | HTTP port.                                                            |
+| `TMDB_REGION`    | `US`        | ISO country code for streaming-provider availability.                 |
 
 ## Project layout
 
@@ -56,48 +56,45 @@ First time? Click **Create an account** in the auth card.
 streaming-app/
 ├── server.js           # Express server, routes, session handling
 ├── lib/
-│   ├── tmdb.js         # TMDB API wrapper (cached, paginated)
+│   ├── tmdb.js         # TMDB API wrapper (cached, movie + TV, providers)
 │   └── store.js        # File-backed user + watchlist store
 ├── public/
-│   ├── index.html      # SPA shell — auth, dashboard, details, watchlist
-│   ├── app.js          # Hash router, filters, watchlist toggle, details
-│   └── styles.css      # Cinematic Noir theme
+│   ├── index.html      # SPA shell — auth, browse, details, watchlist
+│   ├── app.js          # Hash router, filters, sorting, watchlist toggle
+│   └── styles.css      # Cinematic Noir theme (responsive, mobile-ready)
 ├── data/               # Created at runtime — users.json + watchlists.json
+├── render.yaml         # One-click Render deploy config
 ├── .env.example
-├── .gitignore
 └── package.json
 ```
 
-## How it routes
+## Routes
 
 ```
-#/discover            → home dashboard (recommended / now playing / coming soon)
-#/discover (filtered) → grid of results when any filter chip / select is active
-#/upcoming            → full coming-soon list
-#/leaving             → leaving-soon (approximated)
-#/watchlist           → your starred movies
-#/movie/:id           → movie detail page
-#/search?q=…          → search results (typed in the nav bar)
+#/home              → trending movies, trending series, coming soon
+#/movies            → movie grid (service chips, genre + sort selects)
+#/series            → series grid (same filters)
+#/upcoming          → coming-soon movies + series
+#/watchlist         → your starred titles (sort by type/service/rating/…)
+#/title/:type/:id   → detail page (movie or tv)
+#/search?q=…        → mixed search, grouped by movies / series
 ```
 
-## Limitations
+## Deployment
 
-A few honest notes on what isn't possible with free public data:
+See **DEPLOY.md** for the click-by-click guide to hosting this free on Render with a
+public URL that works on any device.
 
-- **"Leaving Soon" is approximated.** Streaming services don't publish leave dates, and TMDB doesn't expose them. We surface older catalog titles still on a service — the ones most likely to rotate off — but it's a hint, not a guarantee. JustWatch has this data but it's behind a paid partner agreement.
-- **Parent guide is a summary, not the full IMDb scoring.** IMDb removed their public API. We construct a parent guide from TMDB's MPAA certification + content keywords, organized into the IMDb-style categories (Sex & Nudity, Violence, Profanity, Substance Use, Frightening Scenes). Every movie page also links to the **full IMDb Parents Guide** for that title — one click to the real thing.
-- **"IMDB rating" displayed is TMDB's `vote_average`.** It correlates closely with IMDb's score but isn't identical. The deep link to IMDb on each movie shows the official IMDb rating.
-- **Auth is demo-grade.** Real bcrypt hashing, signed cookies — but the user store is a JSON file, not a database. Fine for a personal install. Don't deploy this publicly without swapping `lib/store.js` for SQLite/Postgres.
+## Limitations (honest notes)
+
+- **"IMDB rating" in grids is TMDB's `vote_average`** — it correlates closely with IMDb. Detail pages show the official IMDb rating when an OMDb key is configured.
+- **Parent guide is a summary** — certification + content keywords, with a one-click link to the full IMDb Parents Guide.
+- **Auth is demo-grade** — real bcrypt + signed cookies, but a JSON-file store. On Render's free tier the disk is ephemeral: accounts/watchlists reset when the service redeploys or restarts. Fine for personal use; swap `lib/store.js` for a database (or add a Render disk) to make it durable.
 
 ## Tech stack
 
-- **Backend:** Node 18+, Express, bcryptjs, cookie-parser, dotenv
-- **Frontend:** Vanilla JS (no framework), hash-based SPA routing
-- **Data:** TMDB v3 REST API (cached 10 min in-memory)
-- **Persistence:** JSON files in `data/`
+Node 18+ / Express / bcryptjs / cookie-parser · Vanilla-JS hash-routed SPA · TMDB v3 API (10-min cache) · OMDb for IMDb ratings.
 
 ## Attribution
 
 This product uses the TMDB API but is not endorsed or certified by TMDB.
-
-> ![TMDB logo](https://www.themoviedb.org/assets/2/v4/logos/v2/blue_short-8e7b30f73a4020692ccca9c88bafe5dcb6f8a62a4c6bc55cd9ba82bb2cd95f6c.svg)

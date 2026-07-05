@@ -1,5 +1,4 @@
 'use strict';
-
 require('dotenv').config();
 
 const path = require('path');
@@ -11,273 +10,173 @@ const bcrypt = require('bcryptjs');
 const tmdb = require('./lib/tmdb');
 const store = require('./lib/store');
 
-const app = express();
-const PORT = Number(process.env.PORT) || 3000;
-const SESSION_SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
-if (!process.env.SESSION_SECRET) {
-  console.warn('[auth] SESSION_SECRET not set; ephemeral secret generated. Sessions reset on restart.');
+if (!process.env.TMDB_API_KEY) {
+  console.error('FATAL: TMDB_API_KEY is not set. Copy .env.example to .env and add your key.');
+  process.exit(1);
 }
 
-// Render's free tier (and most PaaS) terminate TLS at the proxy. Trust it so
-// secure cookies and req.ip work correctly behind the proxy.
-app.set('trust proxy', 1);
-app.use(express.json({ limit: '64kb' }));
-app.use(cookieParser(SESSION_SECRET));
-
-// ---------- Session helpers ----------
-const SESSION_COOKIE = 'cv_sid';
-const SESSION_MAX_AGE = 1000 * 60 * 60 * 24 * 14;
+const app = express();
+const PORT = process.env.PORT || 3000;
+const SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
 const IS_PROD = process.env.NODE_ENV === 'production';
+const OMDB_KEY = process.env.OMDB_API_KEY || '';
+const COOKIE = 'cv_session';
+
+app.set('trust proxy', 1); // Render sits behind a proxy
+app.use(express.json());
+app.use(cookieParser(SECRET));
+app.use(express.static(path.join(__dirname, 'public')));
+
+// ---- Auth helpers ----------------------------------------------------------
 
 function setSession(res, userId) {
-  res.cookie(SESSION_COOKIE, userId, {
-    signed: true, httpOnly: true,
+  res.cookie(COOKIE, userId, {
+    signed: true,
+    httpOnly: true,
     sameSite: 'lax',
-    secure: IS_PROD, // require HTTPS in prod, allow HTTP locally
-    maxAge: SESSION_MAX_AGE,
+    secure: IS_PROD,
+    maxAge: 1000 * 60 * 60 * 24 * 30 // 30 days
   });
 }
-function clearSession(res) { res.clearCookie(SESSION_COOKIE); }
-function getSessionUserId(req) {
-  return req.signedCookies && req.signedCookies[SESSION_COOKIE] ? req.signedCookies[SESSION_COOKIE] : null;
+
+function currentUser(req) {
+  const id = req.signedCookies[COOKIE];
+  return id ? store.findUserById(id) : null;
 }
+
 function requireAuth(req, res, next) {
-  const userId = getSessionUserId(req);
-  if (!userId) return res.status(401).json({ error: 'Not signed in.' });
-  const user = store.findUserById(userId);
-  if (!user) { clearSession(res); return res.status(401).json({ error: 'Session expired. Please sign in again.' }); }
+  const user = currentUser(req);
+  if (!user) return res.status(401).json({ error: 'Not signed in' });
   req.user = user;
   next();
 }
-function publicUser(u) { return { id: u.id, email: u.email, name: u.name }; }
 
-// ---------- Validation ----------
-function validateEmail(email) {
-  if (typeof email !== 'string') return false;
-  const t = email.trim();
-  return t.length >= 5 && t.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(t);
-}
-function validatePassword(pw) { return typeof pw === 'string' && pw.length >= 8 && pw.length <= 200; }
-
-// ===================================================================
-// Auth
-// ===================================================================
-app.post('/api/auth/signup', async (req, res, next) => {
-  try {
-    const { email, password, name } = req.body || {};
-    if (!validateEmail(email)) return res.status(400).json({ error: 'Please enter a valid email address.' });
-    if (!validatePassword(password)) return res.status(400).json({ error: 'Password must be at least 8 characters.' });
-    const passwordHash = await bcrypt.hash(password, 10);
-    const user = await store.createUser({ email, passwordHash, name });
-    setSession(res, user.id);
-    res.status(201).json({ user: publicUser(user) });
-  } catch (err) { next(err); }
+const wrap = fn => (req, res) => fn(req, res).catch(err => {
+  console.error(err);
+  res.status(err.status || 500).json({ error: err.message || 'Server error' });
 });
 
-app.post('/api/auth/login', async (req, res, next) => {
-  try {
-    const { email, password } = req.body || {};
-    if (!validateEmail(email) || typeof password !== 'string')
-      return res.status(400).json({ error: 'Email and password are required.' });
-    const user = store.findUserByEmail(email);
-    if (!user) return res.status(401).json({ error: 'Incorrect email or password.' });
-    const ok = await bcrypt.compare(password, user.passwordHash);
-    if (!ok) return res.status(401).json({ error: 'Incorrect email or password.' });
-    setSession(res, user.id);
-    res.json({ user: publicUser(user) });
-  } catch (err) { next(err); }
-});
+// ---- Auth routes -------------------------------------------------------------
 
-app.post('/api/auth/logout', (req, res) => { clearSession(res); res.json({ ok: true }); });
+app.post('/api/auth/signup', wrap(async (req, res) => {
+  const { email, password, name } = req.body || {};
+  if (!email || !/.+@.+\..+/.test(email)) return res.status(400).json({ error: 'Valid email required' });
+  if (!password || password.length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters' });
+  if (store.findUserByEmail(email)) return res.status(409).json({ error: 'An account with that email already exists' });
+  const user = store.createUser({ email, name, passHash: await bcrypt.hash(password, 10) });
+  setSession(res, user.id);
+  res.json({ user: { email: user.email, name: user.name } });
+}));
+
+app.post('/api/auth/login', wrap(async (req, res) => {
+  const { email, password } = req.body || {};
+  const user = store.findUserByEmail(email);
+  if (!user || !(await bcrypt.compare(password || '', user.passHash))) {
+    return res.status(401).json({ error: 'Incorrect email or password' });
+  }
+  setSession(res, user.id);
+  res.json({ user: { email: user.email, name: user.name } });
+}));
+
+app.post('/api/auth/logout', (req, res) => {
+  res.clearCookie(COOKIE);
+  res.json({ ok: true });
+});
 
 app.get('/api/auth/me', (req, res) => {
-  const userId = getSessionUserId(req);
-  if (!userId) return res.json({ user: null });
-  const user = store.findUserById(userId);
-  if (!user) { clearSession(res); return res.json({ user: null }); }
-  res.json({ user: publicUser(user) });
+  const user = currentUser(req);
+  res.json({ user: user ? { email: user.email, name: user.name } : null });
 });
 
-// ===================================================================
-// Movies + TV
-// ===================================================================
+// ---- Catalog routes ----------------------------------------------------------
 
-// --- Genres / providers ---
-app.get('/api/movies/genres', async (req, res, next) => {
+app.get('/api/services', (req, res) => {
+  res.json(Object.entries(tmdb.SERVICES).map(([slug, s]) => ({ slug, name: s.name })));
+});
+
+app.get('/api/genres', wrap(async (req, res) => {
+  const type = req.query.type === 'tv' ? 'tv' : 'movie';
+  res.json(await tmdb.getGenres(type));
+}));
+
+app.get('/api/browse', wrap(async (req, res) => {
+  const { type = 'movie', service = '', genre = '', sort = 'popularity', page = 1 } = req.query;
+  res.json(await tmdb.discover({
+    type: type === 'tv' ? 'tv' : 'movie',
+    service, genre, sort,
+    page: Math.max(1, parseInt(page, 10) || 1)
+  }));
+}));
+
+app.get('/api/trending', wrap(async (req, res) => {
+  const type = ['movie', 'tv', 'all'].includes(req.query.type) ? req.query.type : 'all';
+  res.json(await tmdb.trending(type));
+}));
+
+app.get('/api/upcoming', wrap(async (req, res) => {
+  const type = req.query.type === 'tv' ? 'tv' : 'movie';
+  res.json(await tmdb.upcoming(type));
+}));
+
+app.get('/api/search', wrap(async (req, res) => {
+  const q = String(req.query.q || '').trim();
+  if (!q) return res.json({ results: [] });
+  res.json(await tmdb.search(q, parseInt(req.query.page, 10) || 1));
+}));
+
+// IMDb rating via OMDb (cached; quota-friendly), falls back to null.
+const omdbCache = new Map();
+async function imdbRating(imdbId) {
+  if (!OMDB_KEY || !imdbId) return null;
+  const hit = omdbCache.get(imdbId);
+  if (hit && Date.now() - hit.at < 10 * 60 * 1000) return hit.val;
   try {
-    if (req.query.type === 'tv') return res.json({ genres: await tmdb.getTvGenres() });
-    res.json({ genres: await tmdb.getGenres() });
-  } catch (err) { next(err); }
-});
-app.get('/api/movies/providers', (req, res) => res.json({ providers: tmdb.getProviders() }));
+    const res = await fetch(`https://www.omdbapi.com/?apikey=${OMDB_KEY}&i=${imdbId}`);
+    const data = await res.json();
+    const val = data && data.imdbRating && data.imdbRating !== 'N/A'
+      ? { rating: parseFloat(data.imdbRating), votes: data.imdbVotes, rated: data.Rated }
+      : null;
+    omdbCache.set(imdbId, { at: Date.now(), val });
+    return val;
+  } catch { return null; }
+}
 
-// --- Dashboard (one bundled call) ---
-app.get('/api/movies/dashboard', async (req, res, next) => {
-  try {
-    if (req.query.type === 'tv') {
-      const [pop, today, ota] = await Promise.all([tmdb.tvPopular(1), tmdb.tvAiringToday(1), tmdb.tvOnTheAir(1)]);
-      return res.json({
-        recommended:      pop.results.slice(0, 12),
-        recommendedPages: pop.totalPages,
-        nowPlaying:       today.results.slice(0, 12),
-        nowPlayingPages:  today.totalPages,
-        comingSoon:       ota.results.slice(0, 12),
-        comingSoonPages:  ota.totalPages,
-      });
-    }
-    const [pop, np, up] = await Promise.all([tmdb.popular(1), tmdb.nowPlaying(1), tmdb.upcoming(1)]);
-    res.json({
-      recommended:      pop.results.slice(0, 12),
-      recommendedPages: pop.totalPages,
-      nowPlaying:       np.results.slice(0, 12),
-      nowPlayingPages:  np.totalPages,
-      comingSoon:       up.results.slice(0, 12),
-      comingSoonPages:  up.totalPages,
-    });
-  } catch (err) { next(err); }
+app.get('/api/title/:type/:id', wrap(async (req, res) => {
+  const type = req.params.type === 'tv' ? 'tv' : 'movie';
+  const d = await tmdb.details(type, req.params.id);
+  const imdb = await imdbRating(d.imdbId);
+  if (imdb) { d.imdbRating = imdb.rating; if (!d.certification && imdb.rated && imdb.rated !== 'N/A') d.certification = imdb.rated; }
+  res.json(d);
+}));
+
+// ---- Watchlist routes ---------------------------------------------------------
+
+app.get('/api/watchlist', requireAuth, (req, res) => {
+  res.json(store.getWatchlist(req.user.id));
 });
 
-// --- Paginated category endpoints (used by Load More on dashboard sections) ---
-app.get('/api/movies/popular', async (req, res, next) => {
-  try {
-    const page = Number(req.query.page) || 1;
-    const fn = req.query.type === 'tv' ? tmdb.tvPopular : tmdb.popular;
-    res.json(await fn(page));
-  } catch (err) { next(err); }
-});
-app.get('/api/movies/now-playing', async (req, res, next) => {
-  try {
-    const page = Number(req.query.page) || 1;
-    const fn = req.query.type === 'tv' ? tmdb.tvAiringToday : tmdb.nowPlaying;
-    res.json(await fn(page));
-  } catch (err) { next(err); }
-});
-app.get('/api/movies/upcoming', async (req, res, next) => {
-  try {
-    const page = Number(req.query.page) || 1;
-    const fn = req.query.type === 'tv' ? tmdb.tvOnTheAir : tmdb.upcoming;
-    res.json(await fn(page));
-  } catch (err) { next(err); }
-});
-
-// --- Discover (filtered) ---
-app.get('/api/movies/discover', async (req, res, next) => {
-  try {
-    const { genre, provider, sort, page, type } = req.query;
-    const sortMap = type === 'tv'
-      ? { rating: 'vote_average.desc', popular: 'popularity.desc', newest: 'first_air_date.desc', oldest: 'first_air_date.asc', title: 'name.asc' }
-      : { rating: 'vote_average.desc', popular: 'popularity.desc', newest: 'primary_release_date.desc', oldest: 'primary_release_date.asc', title: 'title.asc' };
-    const sortBy = sortMap[sort] || sortMap.popular;
-    const fn = type === 'tv' ? tmdb.tvDiscover : tmdb.discover;
-    res.json(await fn({ genreId: genre, providerId: provider, sortBy, page: Number(page) || 1 }));
-  } catch (err) { next(err); }
-});
-
-// --- Leaving soon (approximated) ---
-app.get('/api/movies/leaving-soon', async (req, res, next) => {
-  try {
-    const page = Number(req.query.page) || 1;
-    const fn = req.query.type === 'tv' ? tmdb.tvLeavingSoon : tmdb.leavingSoon;
-    res.json(await fn(req.query.provider, page));
-  } catch (err) { next(err); }
-});
-
-// --- Search (multi: movies + TV) ---
-app.get('/api/movies/search', async (req, res, next) => {
-  try {
-    const { q, page } = req.query;
-    res.json(await tmdb.searchMulti(q, Number(page) || 1));
-  } catch (err) { next(err); }
-});
-
-// --- Details ---
-// Routes are namespaced by type so the URL is descriptive: /api/movies/movie/123 or /api/movies/tv/456.
-app.get('/api/movies/:type(movie|tv)/:id', async (req, res, next) => {
-  try {
-    const id = Number(req.params.id);
-    if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id.' });
-    const fn = req.params.type === 'tv' ? tmdb.tvDetails : tmdb.movieDetails;
-    res.json(await fn(id));
-  } catch (err) { next(err); }
-});
-// Back-compat: /api/movies/:id treated as movie
-app.get('/api/movies/:id(\\d+)', async (req, res, next) => {
-  try {
-    const id = Number(req.params.id);
-    res.json(await tmdb.movieDetails(id));
-  } catch (err) { next(err); }
-});
-
-// ===================================================================
-// Watchlist (auth required)
-// ===================================================================
-
-app.get('/api/watchlist', requireAuth, async (req, res, next) => {
-  try {
-    const list = store.getWatchlist(req.user.id);
-    if (!list.length) return res.json({ items: [] });
-    const summaries = await Promise.all(list.map(async (entry) => {
-      try {
-        const detail = entry.type === 'tv' ? await tmdb.tvDetails(entry.id) : await tmdb.movieDetails(entry.id);
-        return {
-          type: entry.type,
-          id: detail.id,
-          addedAt: entry.addedAt,
-          title: detail.title,
-          poster: detail.poster,
-          rating: detail.rating,
-          ratingSource: detail.ratingSource,
-          releaseDate: detail.releaseDate,
-          genres: detail.genres,
-          certification: detail.certification,
-          streaming: detail.streaming.flatrate,
-        };
-      } catch (e) {
-        return { type: entry.type, id: entry.id, addedAt: entry.addedAt, error: 'Could not load this title.' };
-      }
-    }));
-    res.json({ items: summaries });
-  } catch (err) { next(err); }
-});
-
-app.post('/api/watchlist/:type(movie|tv)/:id', requireAuth, async (req, res, next) => {
-  try {
-    const list = await store.addToWatchlist(req.user.id, req.params.type, req.params.id);
-    res.json({ items: list });
-  } catch (err) { next(err); }
-});
-
-app.delete('/api/watchlist/:type(movie|tv)/:id', requireAuth, async (req, res, next) => {
-  try {
-    const list = await store.removeFromWatchlist(req.user.id, req.params.type, req.params.id);
-    res.json({ items: list });
-  } catch (err) { next(err); }
-});
-
-// ===================================================================
-// Static + SPA fallback + error handler
-// ===================================================================
-
-app.use(express.static(path.join(__dirname, 'public'), { extensions: ['html'] }));
-app.get(/^\/(?!api\/).*/, (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
-});
-
-app.use((err, req, res, _next) => {
-  const status = err.status || 500;
-  if (status >= 500) console.error('[server]', err);
-  if (err.code === 'TMDB_KEY_MISSING') {
-    return res.status(500).json({ error: err.message, code: 'TMDB_KEY_MISSING' });
+app.post('/api/watchlist', requireAuth, wrap(async (req, res) => {
+  const { id, mediaType, title, poster, rating, year } = req.body || {};
+  let { services } = req.body || {};
+  if (!id || !['movie', 'tv'].includes(mediaType)) return res.status(400).json({ error: 'id and mediaType required' });
+  if (!Array.isArray(services) || !services.length) {
+    services = await tmdb.providers(mediaType, id); // so the watchlist can sort/group by service
   }
-  res.status(status).json({ error: err.message || 'Server error.' });
+  res.json(store.addToWatchlist(req.user.id, {
+    id, mediaType,
+    title: String(title || ''),
+    poster: poster || null,
+    rating: Number(rating) || 0,
+    year: String(year || ''),
+    services: Array.isArray(services) ? services : []
+  }));
+}));
+
+app.delete('/api/watchlist/:mediaType/:id', requireAuth, (req, res) => {
+  res.json(store.removeFromWatchlist(req.user.id, req.params.mediaType, Number(req.params.id)));
 });
 
-app.listen(PORT, () => {
-  console.log(`\n  CineVerse running at http://localhost:${PORT}\n`);
-  if (!process.env.TMDB_API_KEY || process.env.TMDB_API_KEY === 'your_tmdb_v3_api_key_here') {
-    console.warn('  [warn] TMDB_API_KEY not set â movie endpoints will return 500.\n');
-  }
-  if (!process.env.OMDB_API_KEY) {
-    console.warn('  [info] OMDB_API_KEY not set â IMDb ratings will fall back to TMDB.\n');
-  }
-});
+// SPA fallback
+app.get('*', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
+
+app.listen(PORT, () => console.log(`CineVerse running at http://localhost:${PORT}`));
