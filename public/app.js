@@ -10,9 +10,15 @@ const state = {
   services: [],                    // [{slug,name}]
   genres: { movie: [], tv: [] },   // fetched once per type
   watchKeys: new Set(),            // "movie:123"
+  // service + sort are SHARED between Movies and Series (and remembered across visits);
+  // genre and page stay per-type because TMDB movie/tv genre lists differ.
+  shared: (() => {
+    try { return { service: '', sort: 'popularity', ...JSON.parse(localStorage.getItem('cv_prefs') || '{}') }; }
+    catch { return { service: '', sort: 'popularity' }; }
+  })(),
   browse: {
-    movies: { service: '', genre: '', sort: 'popularity', page: 1 },
-    series: { service: '', genre: '', sort: 'popularity', page: 1 }
+    movies: { genre: '', page: 1 },
+    series: { genre: '', page: 1 }
   },
   wlSort: 'added',
   wlType: 'all'
@@ -38,6 +44,7 @@ function toast(msg) {
   t._h = setTimeout(() => t.classList.add('hidden'), 2200);
 }
 function spinner() { view().innerHTML = '<div class="spinner">Loading…</div>'; }
+function savePrefs() { try { localStorage.setItem('cv_prefs', JSON.stringify(state.shared)); } catch { /* private mode */ } }
 function svcName(slug) { const s = state.services.find(x => x.slug === slug); return s ? s.name : slug; }
 
 // ---------- auth ----------
@@ -177,26 +184,27 @@ async function renderHome() {
 async function renderBrowse(kind) {
   const type = kind === 'series' ? 'tv' : 'movie';
   const f = state.browse[kind];
+  const sh = state.shared;
   spinner();
   if (!state.genres[type].length) {
     state.genres[type] = await api(`/api/genres?type=${type}`);
   }
-  const data = await api(`/api/browse?type=${type}&service=${f.service}&genre=${f.genre}&sort=${f.sort}&page=${f.page}`);
+  const data = await api(`/api/browse?type=${type}&service=${sh.service}&genre=${f.genre}&sort=${sh.sort}&page=${f.page}`);
   const chips = [{ slug: '', name: 'All services' }, ...state.services]
-    .map(s => `<button class="chip ${f.service === s.slug ? 'active' : ''}" data-svc="${s.slug}">${esc(s.name)}</button>`).join('');
+    .map(s => `<button class="chip ${sh.service === s.slug ? 'active' : ''}" data-svc="${s.slug}">${esc(s.name)}</button>`).join('');
   const genreOpts = ['<option value="">All genres</option>',
     ...state.genres[type].map(g => `<option value="${g.id}" ${String(f.genre) === String(g.id) ? 'selected' : ''}>${esc(g.name)}</option>`)].join('');
   view().innerHTML = `
-    <h1 class="page-title">${kind === 'series' ? 'Series' : 'Movies'} <small>${f.service ? 'on ' + esc(svcName(f.service)) : 'across all major services'}</small></h1>
+    <h1 class="page-title">${kind === 'series' ? 'Series' : 'Movies'} <small>${sh.service ? 'on ' + esc(svcName(sh.service)) : 'across all major services'}</small></h1>
     <div class="filterbar">
       <div class="chips">${chips}</div>
       <div class="selects">
         <select id="sel-genre" aria-label="Genre">${genreOpts}</select>
         <select id="sel-sort" aria-label="Sort by">
-          <option value="popularity" ${f.sort === 'popularity' ? 'selected' : ''}>Sort: Popularity</option>
-          <option value="rating" ${f.sort === 'rating' ? 'selected' : ''}>Sort: IMDB rating</option>
-          <option value="date" ${f.sort === 'date' ? 'selected' : ''}>Sort: Newest</option>
-          <option value="title" ${f.sort === 'title' ? 'selected' : ''}>Sort: A–Z</option>
+          <option value="popularity" ${sh.sort === 'popularity' ? 'selected' : ''}>Sort: Popularity</option>
+          <option value="rating" ${sh.sort === 'rating' ? 'selected' : ''}>Sort: IMDB rating</option>
+          <option value="date" ${sh.sort === 'date' ? 'selected' : ''}>Sort: Newest</option>
+          <option value="title" ${sh.sort === 'title' ? 'selected' : ''}>Sort: A–Z</option>
         </select>
       </div>
     </div>
@@ -210,10 +218,16 @@ async function renderBrowse(kind) {
     </div>`;
   bindCards(view());
   view().querySelectorAll('.chip').forEach(c => c.addEventListener('click', () => {
-    f.service = c.dataset.svc; f.page = 1; renderBrowse(kind);
+    sh.service = c.dataset.svc;
+    state.browse.movies.page = state.browse.series.page = 1;
+    savePrefs(); renderBrowse(kind);
   }));
   $('#sel-genre').addEventListener('change', e => { f.genre = e.target.value; f.page = 1; renderBrowse(kind); });
-  $('#sel-sort').addEventListener('change', e => { f.sort = e.target.value; f.page = 1; renderBrowse(kind); });
+  $('#sel-sort').addEventListener('change', e => {
+    sh.sort = e.target.value;
+    state.browse.movies.page = state.browse.series.page = 1;
+    savePrefs(); renderBrowse(kind);
+  });
   $('#pg-prev').addEventListener('click', () => { f.page--; renderBrowse(kind); window.scrollTo(0, 0); });
   $('#pg-next').addEventListener('click', () => { f.page++; renderBrowse(kind); window.scrollTo(0, 0); });
 }
