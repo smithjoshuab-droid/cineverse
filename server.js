@@ -39,16 +39,21 @@ function setSession(res, userId) {
   });
 }
 
-function currentUser(req) {
+async function currentUser(req) {
   const id = req.signedCookies[COOKIE];
   return id ? store.findUserById(id) : null;
 }
 
-function requireAuth(req, res, next) {
-  const user = currentUser(req);
-  if (!user) return res.status(401).json({ error: 'Not signed in' });
-  req.user = user;
-  next();
+async function requireAuth(req, res, next) {
+  try {
+    const user = await currentUser(req);
+    if (!user) return res.status(401).json({ error: 'Not signed in' });
+    req.user = user;
+    next();
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
 }
 
 const wrap = fn => (req, res) => fn(req, res).catch(err => {
@@ -68,9 +73,9 @@ app.post('/api/auth/signup', wrap(async (req, res) => {
   const { email, password, name } = req.body || {};
   if (!email || !/.+@.+\..+/.test(email)) return res.status(400).json({ error: 'Valid email required' });
   if (!password || password.length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters' });
-  if (store.findUserByEmail(email)) return res.status(409).json({ error: 'An account with that email already exists' });
+  if (await store.findUserByEmail(email)) return res.status(409).json({ error: 'An account with that email already exists' });
   const recoveryCode = newRecoveryCode();
-  const user = store.createUser({
+  const user = await store.createUser({
     email, name,
     passHash: await bcrypt.hash(password, 10),
     recoveryHash: await bcrypt.hash(normalizeCode(recoveryCode), 10)
@@ -83,12 +88,12 @@ app.post('/api/auth/signup', wrap(async (req, res) => {
 app.post('/api/auth/reset', wrap(async (req, res) => {
   const { email, recoveryCode, newPassword } = req.body || {};
   if (!newPassword || newPassword.length < 6) return res.status(400).json({ error: 'New password must be at least 6 characters' });
-  const user = store.findUserByEmail(email);
+  const user = await store.findUserByEmail(email);
   if (!user || !user.recoveryHash || !(await bcrypt.compare(normalizeCode(recoveryCode), user.recoveryHash))) {
     return res.status(401).json({ error: "Email and recovery code don't match" });
   }
   const fresh = newRecoveryCode();
-  store.updateUser(user.id, {
+  await store.updateUser(user.id, {
     passHash: await bcrypt.hash(newPassword, 10),
     recoveryHash: await bcrypt.hash(normalizeCode(fresh), 10)
   });
@@ -98,7 +103,7 @@ app.post('/api/auth/reset', wrap(async (req, res) => {
 
 app.post('/api/auth/login', wrap(async (req, res) => {
   const { email, password } = req.body || {};
-  const user = store.findUserByEmail(email);
+  const user = await store.findUserByEmail(email);
   if (!user || !(await bcrypt.compare(password || '', user.passHash))) {
     return res.status(401).json({ error: 'Incorrect email or password' });
   }
@@ -111,10 +116,10 @@ app.post('/api/auth/logout', (req, res) => {
   res.json({ ok: true });
 });
 
-app.get('/api/auth/me', (req, res) => {
-  const user = currentUser(req);
+app.get('/api/auth/me', wrap(async (req, res) => {
+  const user = await currentUser(req);
   res.json({ user: user ? { email: user.email, name: user.name } : null });
-});
+}));
 
 // ---- Catalog routes ----------------------------------------------------------
 
@@ -216,9 +221,9 @@ app.get('/api/title/:type/:id', wrap(async (req, res) => {
 
 // ---- Watchlist routes ---------------------------------------------------------
 
-app.get('/api/watchlist', requireAuth, (req, res) => {
-  res.json(store.getWatchlist(req.user.id));
-});
+app.get('/api/watchlist', requireAuth, wrap(async (req, res) => {
+  res.json(await store.getWatchlist(req.user.id));
+}));
 
 app.post('/api/watchlist', requireAuth, wrap(async (req, res) => {
   const { id, mediaType, title, poster, rating, year, seasons } = req.body || {};
@@ -227,7 +232,7 @@ app.post('/api/watchlist', requireAuth, wrap(async (req, res) => {
   if (!Array.isArray(services) || !services.length) {
     services = await tmdb.providers(mediaType, id); // so the watchlist can sort/group by service
   }
-  res.json(store.addToWatchlist(req.user.id, {
+  res.json(await store.addToWatchlist(req.user.id, {
     id, mediaType,
     title: String(title || ''),
     poster: poster || null,
@@ -238,11 +243,11 @@ app.post('/api/watchlist', requireAuth, wrap(async (req, res) => {
   }));
 }));
 
-app.delete('/api/watchlist/:mediaType/:id', requireAuth, (req, res) => {
-  res.json(store.removeFromWatchlist(req.user.id, req.params.mediaType, Number(req.params.id)));
-});
+app.delete('/api/watchlist/:mediaType/:id', requireAuth, wrap(async (req, res) => {
+  res.json(await store.removeFromWatchlist(req.user.id, req.params.mediaType, Number(req.params.id)));
+}));
 
 // SPA fallback
 app.get('*', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
 
-app.listen(PORT, () => console.log(`CineVerse running at http://localhost:${PORT}`));
+app.listen(PORT, () => console.log(`CineVerse running at http://localhost:${PORT} — store: ${store.backend}`));
