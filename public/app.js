@@ -21,7 +21,9 @@ const state = {
     series: { genre: '', page: 1 }
   },
   wlSort: 'added',
-  wlType: 'all'
+  wlType: 'all',
+  searchSort: '',
+  upSort: ''
 };
 
 // ---------- tiny helpers ----------
@@ -44,6 +46,15 @@ function toast(msg) {
   t._h = setTimeout(() => t.classList.add('hidden'), 2200);
 }
 function spinner() { view().innerHTML = '<div class="spinner">Loading…</div>'; }
+function sortList(list, mode) {
+  const by = {
+    rating: (x, y) => ((y.imdbRating ?? y.rating ?? 0) - (x.imdbRating ?? x.rating ?? 0)),
+    seasons: (x, y) => ((y.seasons || 0) - (x.seasons || 0)),
+    title: (x, y) => x.title.localeCompare(y.title),
+    year: (x, y) => (y.year || '').localeCompare(x.year || '')
+  }[mode];
+  return by ? [...list].sort(by) : list;
+}
 function savePrefs() { try { localStorage.setItem('cv_prefs', JSON.stringify(state.shared)); } catch { /* private mode */ } }
 function svcName(slug) { const s = state.services.find(x => x.slug === slug); return s ? s.name : slug; }
 
@@ -60,35 +71,65 @@ function showApp() {
 }
 function setAuthMode(mode) {
   authMode = mode;
-  const signup = mode === 'signup';
+  const signup = mode === 'signup', reset = mode === 'reset';
   $('#auth-name-row').classList.toggle('hidden', !signup);
-  $('#auth-submit').textContent = signup ? 'Create account' : 'Sign in';
-  $('#auth-switch-label').textContent = signup ? 'Already have an account?' : 'New here?';
-  $('#auth-switch-link').textContent = signup ? 'Sign in instead' : 'Create an account';
-  $('#auth-password').autocomplete = signup ? 'new-password' : 'current-password';
+  $('#auth-code-row').classList.toggle('hidden', !reset);
+  $('#auth-password-label').textContent = reset ? 'New password' : 'Password';
+  $('#auth-submit').textContent = signup ? 'Create account' : (reset ? 'Reset password' : 'Sign in');
+  $('#auth-forgot').classList.toggle('hidden', mode !== 'login');
+  $('#auth-switch-label').textContent = mode === 'login' ? 'New here?' : 'Already have an account?';
+  $('#auth-switch-link').textContent = mode === 'login' ? 'Create an account' : 'Sign in instead';
+  $('#auth-password').autocomplete = mode === 'login' ? 'current-password' : 'new-password';
   $('#auth-error').classList.add('hidden');
+}
+async function enterApp() {
+  await loadWatchlistKeys();
+  showApp();
+  location.hash = location.hash && location.hash !== '#' ? location.hash : '#/home';
+  route();
 }
 $('#auth-switch-link').addEventListener('click', e => { e.preventDefault(); setAuthMode(authMode === 'login' ? 'signup' : 'login'); });
 $('#auth-form').addEventListener('submit', async e => {
   e.preventDefault();
-  const body = JSON.stringify({
-    email: $('#auth-email').value,
-    password: $('#auth-password').value,
-    name: $('#auth-name').value
-  });
+  let path = 'login';
+  const payload = { email: $('#auth-email').value };
+  if (authMode === 'signup') {
+    path = 'signup';
+    payload.password = $('#auth-password').value;
+    payload.name = $('#auth-name').value;
+  } else if (authMode === 'reset') {
+    path = 'reset';
+    payload.newPassword = $('#auth-password').value;
+    payload.recoveryCode = $('#auth-code').value;
+  } else {
+    payload.password = $('#auth-password').value;
+  }
   try {
-    const { user } = await api(`/api/auth/${authMode === 'signup' ? 'signup' : 'login'}`, { method: 'POST', body });
-    state.user = user;
-    await loadWatchlistKeys();
-    showApp();
-    location.hash = location.hash && location.hash !== '#' ? location.hash : '#/home';
-    route();
+    const data = await api(`/api/auth/${path}`, { method: 'POST', body: JSON.stringify(payload) });
+    state.user = data.user;
+    if (data.recoveryCode) {
+      // show the (new) recovery code once — user confirms before entering the app
+      $('#auth-form').classList.add('hidden');
+      document.querySelector('.auth-switch').classList.add('hidden');
+      $('#recovery-code').textContent = data.recoveryCode;
+      $('#recovery-box').classList.remove('hidden');
+    } else {
+      await enterApp();
+    }
   } catch (err) {
     const el = $('#auth-error');
     el.textContent = err.message;
     el.classList.remove('hidden');
   }
 });
+$('#rc-done').addEventListener('click', async () => {
+  $('#recovery-box').classList.add('hidden');
+  $('#auth-form').classList.remove('hidden');
+  document.querySelector('.auth-switch').classList.remove('hidden');
+  setAuthMode('login');
+  await enterApp();
+});
+$('#auth-forgot-link').addEventListener('click', e => { e.preventDefault(); setAuthMode('reset'); });
 $('#logout-btn').addEventListener('click', async () => {
   await api('/api/auth/logout', { method: 'POST' });
   state.user = null;
@@ -134,14 +175,18 @@ function cardHTML(x) {
   return `<div class="card" data-key="${key}">
     <span class="badge-type">${x.mediaType === 'tv' ? 'Series' : 'Movie'}</span>
     <button class="star ${on ? 'on' : ''}" title="${on ? 'Remove from' : 'Add to'} watchlist"
-      data-item='${esc(JSON.stringify({ id: x.id, mediaType: x.mediaType, title: x.title, poster: x.poster, rating: score, year: x.year }))}'>${on ? '★' : '☆'}</button>
+      data-item='${esc(JSON.stringify({ id: x.id, mediaType: x.mediaType, title: x.title, poster: x.poster, rating: score, year: x.year, services: x.services || [], seasons: x.seasons || null }))}'>${on ? '★' : '☆'}</button>
     ${poster}
     <div class="meta">
       <p class="title">${esc(x.title)}</p>
       <div class="sub">
         <span class="badge-rating" title="${isImdb ? 'IMDb rating' : 'TMDB rating'}">★ ${score ? Number(score).toFixed(1) : '–'}${isImdb ? '<small class="src-imdb"> IMDb</small>' : ''}</span>
         <span>${esc(x.year || '')}</span>
+        ${x.mediaType === 'tv' && x.seasons ? `<span title="Seasons">${x.seasons} ssn</span>` : ''}
       </div>
+      ${x.services && x.services.length
+        ? `<div class="svcline" title="${esc(x.services.map(svcName).join(', '))}">${esc(x.services.slice(0, 2).map(svcName).join(' · '))}${x.services.length > 2 ? ` +${x.services.length - 2}` : ''}</div>`
+        : ''}
     </div>
   </div>`;
 }
@@ -185,11 +230,13 @@ async function renderBrowse(kind) {
   const type = kind === 'series' ? 'tv' : 'movie';
   const f = state.browse[kind];
   const sh = state.shared;
+  // 'seasons' sort only applies to series; movies quietly use popularity
+  const effSort = (kind !== 'series' && sh.sort === 'seasons') ? 'popularity' : sh.sort;
   spinner();
   if (!state.genres[type].length) {
     state.genres[type] = await api(`/api/genres?type=${type}`);
   }
-  const data = await api(`/api/browse?type=${type}&service=${sh.service}&genre=${f.genre}&sort=${sh.sort}&page=${f.page}`);
+  const data = await api(`/api/browse?type=${type}&service=${sh.service}&genre=${f.genre}&sort=${effSort}&page=${f.page}`);
   const chips = [{ slug: '', name: 'All services' }, ...state.services]
     .map(s => `<button class="chip ${sh.service === s.slug ? 'active' : ''}" data-svc="${s.slug}">${esc(s.name)}</button>`).join('');
   const genreOpts = ['<option value="">All genres</option>',
@@ -205,16 +252,18 @@ async function renderBrowse(kind) {
           <option value="rating" ${sh.sort === 'rating' ? 'selected' : ''}>Sort: IMDB rating</option>
           <option value="date" ${sh.sort === 'date' ? 'selected' : ''}>Sort: Newest</option>
           <option value="title" ${sh.sort === 'title' ? 'selected' : ''}>Sort: A–Z</option>
+          ${kind === 'series' ? `<option value="seasons" ${sh.sort === 'seasons' ? 'selected' : ''}>Sort: Seasons</option>` : ''}
         </select>
       </div>
     </div>
     ${data.results.length
       ? `<div class="grid">${data.results.map(cardHTML).join('')}</div>`
       : `<div class="empty"><span class="big">🕳️</span>Nothing matched those filters.</div>`}
-    <div class="pager">
+    <div class="pager" id="pager">
       <button class="btn-outline" id="pg-prev" ${f.page <= 1 ? 'disabled' : ''}>← Prev</button>
       <span>Page ${data.page} of ${data.totalPages}</span>
       <button class="btn-outline" id="pg-next" ${f.page >= data.totalPages ? 'disabled' : ''}>Next →</button>
+      ${data.totalPages > 1 ? '<button class="btn-outline" id="pg-all">Show all</button>' : ''}
     </div>`;
   bindCards(view());
   view().querySelectorAll('.chip').forEach(c => c.addEventListener('click', () => {
@@ -230,31 +279,76 @@ async function renderBrowse(kind) {
   });
   $('#pg-prev').addEventListener('click', () => { f.page--; renderBrowse(kind); window.scrollTo(0, 0); });
   $('#pg-next').addEventListener('click', () => { f.page++; renderBrowse(kind); window.scrollTo(0, 0); });
+  const allBtn = $('#pg-all');
+  if (allBtn) allBtn.addEventListener('click', async () => {
+    const MAX_TITLES = 200; // keep the page usable; narrow filters to see deeper
+    allBtn.disabled = true;
+    $('#pg-prev').disabled = $('#pg-next').disabled = true;
+    let all = [...data.results];
+    let page = data.page;
+    try {
+      while (page < data.totalPages && all.length < MAX_TITLES) {
+        allBtn.textContent = `Loading… ${all.length} titles`;
+        page += 1;
+        const more = await api(`/api/browse?type=${type}&service=${sh.service}&genre=${f.genre}&sort=${effSort}&page=${page}`);
+        if (!more.results.length) break;
+        all = all.concat(more.results);
+      }
+    } catch { /* show what we have */ }
+    if (effSort === 'rating') all = sortList(all, 'rating');
+    if (effSort === 'seasons') all = sortList(all, 'seasons');
+    const grid = view().querySelector('.grid');
+    if (grid) { grid.innerHTML = all.map(cardHTML).join(''); bindCards(grid); }
+    const truncated = page < data.totalPages;
+    $('#pager').innerHTML = `<span>Showing ${all.length} titles${truncated ? ' (first ' + MAX_TITLES + ' — narrow filters to dig deeper)' : ' — that\'s everything'}</span>`;
+    window.scrollTo(0, 0);
+  });
 }
 
 // ---------- UPCOMING ----------
 async function renderUpcoming() {
   spinner();
-  const [movies, series] = await Promise.all([api('/api/upcoming?type=movie'), api('/api/upcoming?type=tv')]);
+  let [movies, series] = await Promise.all([api('/api/upcoming?type=movie'), api('/api/upcoming?type=tv')]);
+  movies = sortList(movies, state.upSort);
+  series = sortList(series, state.upSort);
   view().innerHTML = `
     <h1 class="page-title">Coming Soon</h1>
+    <div class="filterbar"><div class="selects" style="margin-left:0">
+      <select id="up-sort" aria-label="Sort upcoming">
+        <option value="" ${!state.upSort ? 'selected' : ''}>Sort: Release order</option>
+        <option value="rating" ${state.upSort === 'rating' ? 'selected' : ''}>Sort: IMDB rating</option>
+        <option value="seasons" ${state.upSort === 'seasons' ? 'selected' : ''}>Sort: Seasons (series)</option>
+        <option value="title" ${state.upSort === 'title' ? 'selected' : ''}>Sort: A–Z</option>
+      </select>
+    </div></div>
     <section class="row"><h2>🎬 Movies</h2><div class="grid">${movies.map(cardHTML).join('') || '<p class="empty">Nothing found.</p>'}</div></section>
     <section class="row"><h2>📺 Series</h2><div class="grid">${series.map(cardHTML).join('') || '<p class="empty">Nothing found.</p>'}</div></section>`;
   bindCards(view());
+  $('#up-sort').addEventListener('change', e => { state.upSort = e.target.value; renderUpcoming(); });
 }
 
 // ---------- SEARCH ----------
 async function renderSearch(q) {
   spinner();
   const data = await api(`/api/search?q=${encodeURIComponent(q)}`);
-  const movies = data.results.filter(x => x.mediaType === 'movie');
-  const series = data.results.filter(x => x.mediaType === 'tv');
+  const movies = sortList(data.results.filter(x => x.mediaType === 'movie'), state.searchSort);
+  const series = sortList(data.results.filter(x => x.mediaType === 'tv'), state.searchSort);
   view().innerHTML = `
     <h1 class="page-title">Results for “${esc(q)}” <small>${data.results.length} titles</small></h1>
+    <div class="filterbar"><div class="selects" style="margin-left:0">
+      <select id="search-sort" aria-label="Sort results">
+        <option value="" ${!state.searchSort ? 'selected' : ''}>Sort: Relevance</option>
+        <option value="rating" ${state.searchSort === 'rating' ? 'selected' : ''}>Sort: IMDB rating</option>
+        <option value="seasons" ${state.searchSort === 'seasons' ? 'selected' : ''}>Sort: Seasons (series)</option>
+        <option value="year" ${state.searchSort === 'year' ? 'selected' : ''}>Sort: Year</option>
+        <option value="title" ${state.searchSort === 'title' ? 'selected' : ''}>Sort: A–Z</option>
+      </select>
+    </div></div>
     ${movies.length ? `<section class="row"><h2>🎬 Movies</h2><div class="grid">${movies.map(cardHTML).join('')}</div></section>` : ''}
     ${series.length ? `<section class="row"><h2>📺 Series</h2><div class="grid">${series.map(cardHTML).join('')}</div></section>` : ''}
     ${!data.results.length ? '<div class="empty"><span class="big">🔍</span>No movies or series matched.</div>' : ''}`;
   bindCards(view());
+  $('#search-sort').addEventListener('change', e => { state.searchSort = e.target.value; renderSearch(q); });
 }
 $('#search-form').addEventListener('submit', e => {
   e.preventDefault();
@@ -320,7 +414,7 @@ async function renderTitle(type, id) {
       </div>
     </div>`;
   $('#d-watch').addEventListener('click', async () => {
-    await toggleWatch({ id: d.id, mediaType: d.mediaType, title: d.title, poster: d.poster, rating: d.imdbRating || d.rating, year: d.year, services: d.services });
+    await toggleWatch({ id: d.id, mediaType: d.mediaType, title: d.title, poster: d.poster, rating: d.imdbRating || d.rating, year: d.year, services: d.services, seasons: d.seasons });
     renderTitle(type, id);
   });
 }
@@ -338,6 +432,7 @@ async function renderWatchlist() {
     rating: (a, b) => (b.rating || 0) - (a.rating || 0),
     title: (a, b) => a.title.localeCompare(b.title),
     year: (a, b) => (b.year || '').localeCompare(a.year || ''),
+    seasons: (a, b) => (b.seasons || 0) - (a.seasons || 0),
     type: (a, b) => a.mediaType.localeCompare(b.mediaType) || (b.rating || 0) - (a.rating || 0),
     service: (a, b) => ((a.services || [])[0] || 'zzz').localeCompare((b.services || [])[0] || 'zzz') || (b.rating || 0) - (a.rating || 0)
   };
@@ -375,6 +470,7 @@ async function renderWatchlist() {
           <option value="type" ${state.wlSort === 'type' ? 'selected' : ''}>Sort: Type (movies/series)</option>
           <option value="title" ${state.wlSort === 'title' ? 'selected' : ''}>Sort: A–Z</option>
           <option value="year" ${state.wlSort === 'year' ? 'selected' : ''}>Sort: Year</option>
+          <option value="seasons" ${state.wlSort === 'seasons' ? 'selected' : ''}>Sort: Seasons</option>
         </select>
       </div>
     </div>

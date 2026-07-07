@@ -28,10 +28,15 @@
         <label for="auth-email">Email</label>
         <input id="auth-email" type="email" autocomplete="email" required placeholder="you@example.com">
       </div>
+      <div id="auth-code-row" class="field hidden">
+        <label for="auth-code">Recovery code</label>
+        <input id="auth-code" type="text" autocomplete="off" placeholder="XXXX-XXXX-XXXX">
+      </div>
       <div class="field">
-        <label for="auth-password">Password</label>
+        <label for="auth-password" id="auth-password-label">Password</label>
         <input id="auth-password" type="password" autocomplete="current-password" required minlength="6" placeholder="••••••••">
       </div>
+      <p class="auth-forgot" id="auth-forgot"><a href="#" id="auth-forgot-link">Forgot password?</a></p>
       <p id="auth-error" class="auth-error hidden"></p>
       <button type="submit" class="btn-primary" id="auth-submit">Sign in</button>
     </form>
@@ -39,6 +44,13 @@
       <span id="auth-switch-label">New here?</span>
       <a href="#" id="auth-switch-link">Create an account</a>
     </p>
+    <div id="recovery-box" class="recovery-box hidden">
+      <h3>Save your recovery code</h3>
+      <p class="rc-note">This code is the <b>only</b> way to reset your password if you forget it.
+      Write it down or save it in a password manager.</p>
+      <div class="rc-code" id="recovery-code"></div>
+      <button class="btn-primary" id="rc-done">I've saved it — continue</button>
+    </div>
   </div>
 </div>
 
