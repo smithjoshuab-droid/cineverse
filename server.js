@@ -58,14 +58,42 @@ const wrap = fn => (req, res) => fn(req, res).catch(err => {
 
 // ---- Auth routes -------------------------------------------------------------
 
+function newRecoveryCode() {
+  const raw = crypto.randomBytes(6).toString('hex').toUpperCase();
+  return `${raw.slice(0, 4)}-${raw.slice(4, 8)}-${raw.slice(8, 12)}`;
+}
+const normalizeCode = c => String(c || '').replace(/[^a-z0-9]/gi, '').toUpperCase();
+
 app.post('/api/auth/signup', wrap(async (req, res) => {
   const { email, password, name } = req.body || {};
   if (!email || !/.+@.+\..+/.test(email)) return res.status(400).json({ error: 'Valid email required' });
   if (!password || password.length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters' });
   if (store.findUserByEmail(email)) return res.status(409).json({ error: 'An account with that email already exists' });
-  const user = store.createUser({ email, name, passHash: await bcrypt.hash(password, 10) });
+  const recoveryCode = newRecoveryCode();
+  const user = store.createUser({
+    email, name,
+    passHash: await bcrypt.hash(password, 10),
+    recoveryHash: await bcrypt.hash(normalizeCode(recoveryCode), 10)
+  });
   setSession(res, user.id);
-  res.json({ user: { email: user.email, name: user.name } });
+  res.json({ user: { email: user.email, name: user.name }, recoveryCode });
+}));
+
+// Forgot password: email + recovery code -> new password (a fresh code is issued).
+app.post('/api/auth/reset', wrap(async (req, res) => {
+  const { email, recoveryCode, newPassword } = req.body || {};
+  if (!newPassword || newPassword.length < 6) return res.status(400).json({ error: 'New password must be at least 6 characters' });
+  const user = store.findUserByEmail(email);
+  if (!user || !user.recoveryHash || !(await bcrypt.compare(normalizeCode(recoveryCode), user.recoveryHash))) {
+    return res.status(401).json({ error: "Email and recovery code don't match" });
+  }
+  const fresh = newRecoveryCode();
+  store.updateUser(user.id, {
+    passHash: await bcrypt.hash(newPassword, 10),
+    recoveryHash: await bcrypt.hash(normalizeCode(fresh), 10)
+  });
+  setSession(res, user.id);
+  res.json({ user: { email: user.email, name: user.name }, recoveryCode: fresh });
 }));
 
 app.post('/api/auth/login', wrap(async (req, res) => {
@@ -110,6 +138,9 @@ app.get('/api/browse', wrap(async (req, res) => {
   if (sort === 'rating') {
     data.results.sort((a, b) => (b.imdbRating ?? b.rating ?? 0) - (a.imdbRating ?? a.rating ?? 0));
   }
+  if (sort === 'seasons') {
+    data.results.sort((a, b) => (b.seasons || 0) - (a.seasons || 0));
+  }
   res.json(data);
 }));
 
@@ -149,21 +180,31 @@ async function imdbRating(imdbId) {
   } catch { return null; }
 }
 
-// Attach real IMDb ratings to a list of titles (small batches; falls back to TMDB score).
-async function enrichWithImdb(items) {
-  if (!OMDB_KEY || !Array.isArray(items) || !items.length) return items;
+// Attach streaming services, season counts (TV), and real IMDb ratings to a list of titles.
+async function enrichItems(items) {
+  if (!Array.isArray(items) || !items.length) return items;
   const CHUNK = 8;
   for (let i = 0; i < items.length; i += CHUNK) {
     await Promise.all(items.slice(i, i + CHUNK).map(async item => {
-      try {
-        const imdbId = await tmdb.imdbIdFor(item.mediaType, item.id);
-        const imdb = await imdbRating(imdbId);
-        if (imdb && imdb.rating) item.imdbRating = imdb.rating;
-      } catch { /* keep TMDB rating */ }
+      const jobs = [
+        tmdb.providers(item.mediaType, item.id).then(svcs => { item.services = svcs; }).catch(() => { item.services = []; })
+      ];
+      if (item.mediaType === 'tv') {
+        jobs.push(tmdb.tvBasics(item.id).then(b => { if (b.seasons) item.seasons = b.seasons; }).catch(() => {}));
+      }
+      if (OMDB_KEY) {
+        jobs.push((async () => {
+          const imdbId = await tmdb.imdbIdFor(item.mediaType, item.id);
+          const imdb = await imdbRating(imdbId);
+          if (imdb && imdb.rating) item.imdbRating = imdb.rating;
+        })().catch(() => {}));
+      }
+      await Promise.all(jobs);
     }));
   }
   return items;
 }
+const enrichWithImdb = enrichItems; // back-compat alias
 
 app.get('/api/title/:type/:id', wrap(async (req, res) => {
   const type = req.params.type === 'tv' ? 'tv' : 'movie';
@@ -180,7 +221,7 @@ app.get('/api/watchlist', requireAuth, (req, res) => {
 });
 
 app.post('/api/watchlist', requireAuth, wrap(async (req, res) => {
-  const { id, mediaType, title, poster, rating, year } = req.body || {};
+  const { id, mediaType, title, poster, rating, year, seasons } = req.body || {};
   let { services } = req.body || {};
   if (!id || !['movie', 'tv'].includes(mediaType)) return res.status(400).json({ error: 'id and mediaType required' });
   if (!Array.isArray(services) || !services.length) {
@@ -192,6 +233,7 @@ app.post('/api/watchlist', requireAuth, wrap(async (req, res) => {
     poster: poster || null,
     rating: Number(rating) || 0,
     year: String(year || ''),
+    seasons: Number(seasons) || null,
     services: Array.isArray(services) ? services : []
   }));
 }));
