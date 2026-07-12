@@ -1,5 +1,7 @@
 'use strict';
-/* CineVerse SPA — hash router, movies + series, filters, watchlist. */
+/* CineVerse SPA — public browsing, sign-in only for the watchlist.
+   Lists render instantly from TMDB, then IMDb ratings / services / seasons
+   are patched in from /api/enrich. */
 
 const IMG = 'https://image.tmdb.org/t/p';
 const $ = sel => document.querySelector(sel);
@@ -7,36 +9,43 @@ const view = () => $('#view');
 
 const state = {
   user: null,
-  services: [],                    // [{slug,name}]
-  genres: { movie: [], tv: [] },   // fetched once per type
-  watchKeys: new Set(),            // "movie:123"
-  // service + sort are SHARED between Movies and Series (and remembered across visits);
-  // genre and page stay per-type because TMDB movie/tv genre lists differ.
+  authKnown: false,           // /api/auth/me resolved
+  services: [],
+  genres: { movie: [], tv: [] },
+  watchKeys: new Set(),
   shared: (() => {
     try { return { service: '', sort: 'popularity', ...JSON.parse(localStorage.getItem('cv_prefs') || '{}') }; }
     catch { return { service: '', sort: 'popularity' }; }
   })(),
-  browse: {
-    movies: { genre: '', page: 1 },
-    series: { genre: '', page: 1 }
-  },
-  wlSort: 'added',
-  wlType: 'all',
-  searchSort: '',
-  upSort: ''
+  browse: { movies: { genre: '', page: 1 }, series: { genre: '', page: 1 } },
+  wlSort: 'added', wlType: 'all', searchSort: '', upSort: '',
+  pendingStar: null           // item to add right after a sign-in triggered by a star
 };
 
-// ---------- tiny helpers ----------
+/* ============================ helpers ============================ */
+
+const apiCache = new Map(); // url/body -> { at, data }
+const API_TTL = 5 * 60 * 1000;
+
 async function api(path, opts = {}) {
-  const res = await fetch(path, {
-    headers: { 'Content-Type': 'application/json' },
-    credentials: 'same-origin',
-    ...opts
-  });
+  const isGet = !opts.method || opts.method === 'GET';
+  const cacheable = (isGet && !path.startsWith('/api/auth') && !path.startsWith('/api/watchlist'))
+    || path === '/api/enrich';
+  const key = path + (opts.body || '');
+  if (cacheable) {
+    const hit = apiCache.get(key);
+    if (hit && Date.now() - hit.at < API_TTL) return hit.data;
+  }
+  const res = await fetch(path, { headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin', ...opts });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
+  if (cacheable) {
+    apiCache.set(key, { at: Date.now(), data });
+    if (apiCache.size > 120) apiCache.delete(apiCache.keys().next().value);
+  }
   return data;
 }
+
 function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function toast(msg) {
   const t = $('#toast');
@@ -45,7 +54,8 @@ function toast(msg) {
   clearTimeout(t._h);
   t._h = setTimeout(() => t.classList.add('hidden'), 2200);
 }
-function spinner() { view().innerHTML = '<div class="spinner">Loading…</div>'; }
+function svcName(slug) { const s = state.services.find(x => x.slug === slug); return s ? s.name : slug; }
+function savePrefs() { try { localStorage.setItem('cv_prefs', JSON.stringify(state.shared)); } catch { /* private mode */ } }
 function sortList(list, mode) {
   const by = {
     rating: (x, y) => ((y.imdbRating ?? y.rating ?? 0) - (x.imdbRating ?? x.rating ?? 0)),
@@ -55,115 +65,13 @@ function sortList(list, mode) {
   }[mode];
   return by ? [...list].sort(by) : list;
 }
-function savePrefs() { try { localStorage.setItem('cv_prefs', JSON.stringify(state.shared)); } catch { /* private mode */ } }
-function svcName(slug) { const s = state.services.find(x => x.slug === slug); return s ? s.name : slug; }
-
-// ---------- auth ----------
-let authMode = 'login';
-function showAuth() {
-  $('#app').classList.add('hidden');
-  $('#auth-screen').classList.remove('hidden');
-}
-function showApp() {
-  $('#auth-screen').classList.add('hidden');
-  $('#app').classList.remove('hidden');
-  $('#user-name').textContent = state.user.name || state.user.email;
-}
-function setAuthMode(mode) {
-  authMode = mode;
-  const signup = mode === 'signup', reset = mode === 'reset';
-  $('#auth-name-row').classList.toggle('hidden', !signup);
-  $('#auth-code-row').classList.toggle('hidden', !reset);
-  $('#auth-password-label').textContent = reset ? 'New password' : 'Password';
-  $('#auth-submit').textContent = signup ? 'Create account' : (reset ? 'Reset password' : 'Sign in');
-  $('#auth-forgot').classList.toggle('hidden', mode !== 'login');
-  $('#auth-switch-label').textContent = mode === 'login' ? 'New here?' : 'Already have an account?';
-  $('#auth-switch-link').textContent = mode === 'login' ? 'Create an account' : 'Sign in instead';
-  $('#auth-password').autocomplete = mode === 'login' ? 'current-password' : 'new-password';
-  $('#auth-error').classList.add('hidden');
-}
-async function enterApp() {
-  await loadWatchlistKeys();
-  showApp();
-  location.hash = location.hash && location.hash !== '#' ? location.hash : '#/home';
-  route();
-}
-$('#auth-switch-link').addEventListener('click', e => { e.preventDefault(); setAuthMode(authMode === 'login' ? 'signup' : 'login'); });
-$('#auth-form').addEventListener('submit', async e => {
-  e.preventDefault();
-  let path = 'login';
-  const payload = { email: $('#auth-email').value };
-  if (authMode === 'signup') {
-    path = 'signup';
-    payload.password = $('#auth-password').value;
-    payload.name = $('#auth-name').value;
-  } else if (authMode === 'reset') {
-    path = 'reset';
-    payload.newPassword = $('#auth-password').value;
-    payload.recoveryCode = $('#auth-code').value;
-  } else {
-    payload.password = $('#auth-password').value;
-  }
-  try {
-    const data = await api(`/api/auth/${path}`, { method: 'POST', body: JSON.stringify(payload) });
-    state.user = data.user;
-    if (data.recoveryCode) {
-      // show the (new) recovery code once — user confirms before entering the app
-      $('#auth-form').classList.add('hidden');
-      document.querySelector('.auth-switch').classList.add('hidden');
-      $('#recovery-code').textContent = data.recoveryCode;
-      $('#recovery-box').classList.remove('hidden');
-    } else {
-      await enterApp();
-    }
-  } catch (err) {
-    const el = $('#auth-error');
-    el.textContent = err.message;
-    el.classList.remove('hidden');
-  }
-});
-$('#rc-done').addEventListener('click', async () => {
-  $('#recovery-box').classList.add('hidden');
-  $('#auth-form').classList.remove('hidden');
-  document.querySelector('.auth-switch').classList.remove('hidden');
-  setAuthMode('login');
-  await enterApp();
-});
-$('#auth-forgot-link').addEventListener('click', e => { e.preventDefault(); setAuthMode('reset'); });
-$('#logout-btn').addEventListener('click', async () => {
-  await api('/api/auth/logout', { method: 'POST' });
-  state.user = null;
-  state.watchKeys.clear();
-  showAuth();
-});
-
-async function loadWatchlistKeys() {
-  try {
-    const list = await api('/api/watchlist');
-    state.watchKeys = new Set(list.map(x => x.key));
-  } catch { state.watchKeys = new Set(); }
+function skeletonGrid(n = 14, hscroll = false) {
+  const cell = '<div class="sk-card"><div class="sk-poster"></div><div class="sk-line"></div><div class="sk-line short"></div></div>';
+  return `<div class="${hscroll ? 'hscroll' : 'grid'}">${cell.repeat(n)}</div>`;
 }
 
-// ---------- watchlist toggle ----------
-async function toggleWatch(item, btn) {
-  const key = `${item.mediaType}:${item.id}`;
-  try {
-    if (state.watchKeys.has(key)) {
-      await api(`/api/watchlist/${item.mediaType}/${item.id}`, { method: 'DELETE' });
-      state.watchKeys.delete(key);
-      toast(`Removed “${item.title}” from watchlist`);
-      if (btn) { btn.classList.remove('on'); btn.textContent = '☆'; }
-      if (currentRoute().startsWith('#/watchlist')) renderWatchlist();
-    } else {
-      await api('/api/watchlist', { method: 'POST', body: JSON.stringify(item) });
-      state.watchKeys.add(key);
-      toast(`Added “${item.title}” to watchlist ★`);
-      if (btn) { btn.classList.add('on'); btn.textContent = '★'; }
-    }
-  } catch (err) { toast(err.message); }
-}
+/* ============================ cards + enrichment ============================ */
 
-// ---------- card rendering ----------
 function cardHTML(x) {
   const key = `${x.mediaType}:${x.id}`;
   const on = state.watchKeys.has(key);
@@ -190,6 +98,7 @@ function cardHTML(x) {
     </div>
   </div>`;
 }
+
 function bindCards(root) {
   root.querySelectorAll('.card').forEach(card => {
     card.addEventListener('click', e => {
@@ -206,35 +115,243 @@ function bindCards(root) {
   });
 }
 
-// ---------- HOME ----------
-async function renderHome() {
-  spinner();
-  const [tm, tt, up] = await Promise.all([
-    api('/api/trending?type=movie'),
-    api('/api/trending?type=tv'),
-    api('/api/upcoming?type=movie')
-  ]);
-  view().innerHTML = `
-    <h1 class="page-title">Discover <small>trending this week</small></h1>
-    <section class="row"><h2>🔥 Trending Movies <a href="#/movies">browse all →</a></h2>
-      <div class="hscroll">${tm.slice(0, 15).map(cardHTML).join('')}</div></section>
-    <section class="row"><h2>📺 Trending Series <a href="#/series">browse all →</a></h2>
-      <div class="hscroll">${tt.slice(0, 15).map(cardHTML).join('')}</div></section>
-    <section class="row"><h2>🎬 Coming Soon <a href="#/upcoming">see all →</a></h2>
-      <div class="hscroll">${up.slice(0, 15).map(cardHTML).join('')}</div></section>`;
-  bindCards(view());
+// Fetch IMDb rating / services / seasons for items still missing them,
+// then re-render the grid element (optionally re-sorted).
+async function enrich(items, gridEl, resortMode) {
+  const need = items.filter(x => x.services === undefined);
+  if (!need.length || !gridEl) return;
+  for (let i = 0; i < need.length; i += 60) {
+    const chunk = need.slice(i, i + 60);
+    try {
+      const map = await api('/api/enrich', {
+        method: 'POST',
+        body: JSON.stringify({ keys: chunk.map(x => `${x.mediaType}:${x.id}`) })
+      });
+      for (const x of chunk) {
+        const e = map[`${x.mediaType}:${x.id}`];
+        if (e) Object.assign(x, e, { services: e.services || [] });
+        else x.services = [];
+      }
+    } catch { chunk.forEach(x => { if (x.services === undefined) x.services = []; }); }
+    if (!gridEl.isConnected) return; // user navigated away
+    const sorted = resortMode ? sortList(items, resortMode) : items;
+    gridEl.innerHTML = sorted.map(cardHTML).join('');
+    bindCards(gridEl);
+  }
 }
 
-// ---------- BROWSE (movies / series) ----------
+/* ============================ auth (modal) ============================ */
+
+let authMode = 'login';
+
+function refreshHeader() {
+  const signedIn = !!state.user;
+  $('#user-name').classList.toggle('hidden', !signedIn);
+  $('#logout-btn').classList.toggle('hidden', !signedIn);
+  $('#signin-btn').classList.toggle('hidden', signedIn);
+  if (signedIn) $('#user-name').textContent = state.user.name || state.user.email;
+}
+
+function openAuth(mode = 'login', tagline) {
+  setAuthMode(mode);
+  $('#auth-tagline').innerHTML = tagline || 'Sign in to save your watchlist —<br>it syncs to every device.';
+  $('#auth-modal').classList.remove('hidden');
+  setTimeout(() => $('#auth-email').focus(), 60);
+}
+function closeAuth() {
+  $('#auth-modal').classList.add('hidden');
+  $('#auth-form').classList.remove('hidden');
+  document.querySelector('.auth-switch').classList.remove('hidden');
+  $('#recovery-box').classList.add('hidden');
+  state.pendingStar = null;
+}
+
+function setAuthMode(mode) {
+  authMode = mode;
+  const signup = mode === 'signup', reset = mode === 'reset';
+  $('#auth-name-row').classList.toggle('hidden', !signup);
+  $('#auth-code-row').classList.toggle('hidden', !reset);
+  $('#auth-password-label').textContent = reset ? 'New password' : 'Password';
+  $('#auth-submit').textContent = signup ? 'Create account' : (reset ? 'Reset password' : 'Sign in');
+  $('#auth-forgot').classList.toggle('hidden', mode !== 'login');
+  $('#auth-switch-label').textContent = mode === 'login' ? 'New here?' : 'Already have an account?';
+  $('#auth-switch-link').textContent = mode === 'login' ? 'Create an account' : 'Sign in instead';
+  $('#auth-password').autocomplete = mode === 'login' ? 'current-password' : 'new-password';
+  $('#auth-error').classList.add('hidden');
+}
+
+async function afterAuth() {
+  refreshHeader();
+  await loadWatchlistKeys();
+  if (state.pendingStar) {
+    const item = state.pendingStar;
+    state.pendingStar = null;
+    await toggleWatch(item, null);
+  }
+  route(); // re-render current view with stars/watchlist state
+}
+
+$('#signin-btn').addEventListener('click', () => openAuth('login'));
+$('#auth-close').addEventListener('click', closeAuth);
+$('#auth-modal').addEventListener('click', e => { if (e.target === $('#auth-modal')) closeAuth(); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape') { closeAuth(); hideSuggestions(); } });
+$('#auth-switch-link').addEventListener('click', e => { e.preventDefault(); setAuthMode(authMode === 'login' ? 'signup' : 'login'); });
+$('#auth-forgot-link').addEventListener('click', e => { e.preventDefault(); setAuthMode('reset'); });
+
+$('#auth-form').addEventListener('submit', async e => {
+  e.preventDefault();
+  let path = 'login';
+  const payload = { email: $('#auth-email').value };
+  if (authMode === 'signup') { path = 'signup'; payload.password = $('#auth-password').value; payload.name = $('#auth-name').value; }
+  else if (authMode === 'reset') { path = 'reset'; payload.newPassword = $('#auth-password').value; payload.recoveryCode = $('#auth-code').value; }
+  else payload.password = $('#auth-password').value;
+  try {
+    const data = await api(`/api/auth/${path}`, { method: 'POST', body: JSON.stringify(payload) });
+    state.user = data.user;
+    if (data.recoveryCode) {
+      $('#auth-form').classList.add('hidden');
+      document.querySelector('.auth-switch').classList.add('hidden');
+      $('#recovery-code').textContent = data.recoveryCode;
+      $('#recovery-box').classList.remove('hidden');
+    } else {
+      closeAuth();
+      await afterAuth();
+      toast(`Welcome back${state.user.name ? ', ' + state.user.name : ''}!`);
+    }
+  } catch (err) {
+    const el = $('#auth-error');
+    el.textContent = err.message;
+    el.classList.remove('hidden');
+  }
+});
+
+$('#rc-done').addEventListener('click', async () => {
+  $('#recovery-box').classList.add('hidden');
+  $('#auth-form').classList.remove('hidden');
+  document.querySelector('.auth-switch').classList.remove('hidden');
+  setAuthMode('login');
+  $('#auth-modal').classList.add('hidden');
+  await afterAuth();
+  toast('Account ready — happy watching!');
+});
+
+$('#logout-btn').addEventListener('click', async () => {
+  await api('/api/auth/logout', { method: 'POST' });
+  state.user = null;
+  state.watchKeys.clear();
+  refreshHeader();
+  route();
+});
+
+async function loadWatchlistKeys() {
+  if (!state.user) { state.watchKeys = new Set(); return; }
+  try {
+    const list = await api('/api/watchlist');
+    state.watchKeys = new Set(list.map(x => x.key));
+  } catch { state.watchKeys = new Set(); }
+}
+
+/* ============================ watchlist toggle ============================ */
+
+async function toggleWatch(item, btn) {
+  if (!state.user) {
+    state.pendingStar = item;
+    openAuth('login', `Sign in to add <b>${esc(item.title)}</b> to your watchlist.`);
+    return;
+  }
+  const key = `${item.mediaType}:${item.id}`;
+  try {
+    if (state.watchKeys.has(key)) {
+      await api(`/api/watchlist/${item.mediaType}/${item.id}`, { method: 'DELETE' });
+      state.watchKeys.delete(key);
+      toast(`Removed “${item.title}” from watchlist`);
+      if (btn) { btn.classList.remove('on'); btn.textContent = '☆'; }
+      if (currentRoute().startsWith('#/watchlist')) renderWatchlist();
+    } else {
+      await api('/api/watchlist', { method: 'POST', body: JSON.stringify(item) });
+      state.watchKeys.add(key);
+      toast(`Added “${item.title}” to watchlist ★`);
+      if (btn) { btn.classList.add('on'); btn.textContent = '★'; }
+    }
+  } catch (err) { toast(err.message); }
+}
+
+/* ============================ search suggestions ============================ */
+
+let sugTimer = null;
+function hideSuggestions() { $('#suggestions').classList.add('hidden'); }
+
+$('#search-input').addEventListener('input', () => {
+  clearTimeout(sugTimer);
+  const q = $('#search-input').value.trim();
+  if (q.length < 2) { hideSuggestions(); return; }
+  sugTimer = setTimeout(async () => {
+    try {
+      const data = await api(`/api/search?q=${encodeURIComponent(q)}`);
+      if ($('#search-input').value.trim() !== q) return; // stale
+      const top = data.results.slice(0, 6);
+      if (!top.length) { hideSuggestions(); return; }
+      $('#suggestions').innerHTML = top.map(x => `
+        <div class="sug" data-key="${x.mediaType}:${x.id}">
+          ${x.poster ? `<img loading="lazy" src="${IMG}/w92${x.poster}" alt="">` : '<div class="noimg">🎬</div>'}
+          <div><div class="s-title">${esc(x.title)}</div>
+          <div class="s-sub">${x.mediaType === 'tv' ? 'Series' : 'Movie'}${x.year ? ' · ' + esc(x.year) : ''} · ★ ${x.rating ? x.rating.toFixed(1) : '–'}</div></div>
+        </div>`).join('') + `<div class="sug-all">See all results for “${esc(q)}” →</div>`;
+      $('#suggestions').classList.remove('hidden');
+      $('#suggestions').querySelectorAll('.sug').forEach(el => el.addEventListener('mousedown', () => {
+        const [type, id] = el.dataset.key.split(':');
+        hideSuggestions();
+        location.hash = `#/title/${type}/${id}`;
+      }));
+      $('#suggestions').querySelector('.sug-all').addEventListener('mousedown', () => {
+        hideSuggestions();
+        location.hash = `#/search?q=${encodeURIComponent(q)}`;
+      });
+    } catch { hideSuggestions(); }
+  }, 280);
+});
+$('#search-input').addEventListener('blur', () => setTimeout(hideSuggestions, 180));
+$('#search-form').addEventListener('submit', e => {
+  e.preventDefault();
+  const q = $('#search-input').value.trim();
+  hideSuggestions();
+  if (q) location.hash = `#/search?q=${encodeURIComponent(q)}`;
+});
+
+/* ============================ views ============================ */
+
+async function renderHome() {
+  view().innerHTML = `
+    <h1 class="page-title">Discover <small>trending this week</small></h1>
+    <section class="row"><h2>🔥 Trending Movies <a href="#/movies">browse all →</a></h2><div id="row-tm">${skeletonGrid(8, true)}</div></section>
+    <section class="row"><h2>📺 Trending Series <a href="#/series">browse all →</a></h2><div id="row-tt">${skeletonGrid(8, true)}</div></section>
+    <section class="row"><h2>🎬 Coming Soon <a href="#/upcoming">see all →</a></h2><div id="row-up">${skeletonGrid(8, true)}</div></section>`;
+  const fill = async (sel, promise) => {
+    try {
+      const items = (await promise).slice(0, 15);
+      const box = $(sel);
+      if (!box || !box.isConnected) return;
+      box.innerHTML = `<div class="hscroll">${items.map(cardHTML).join('')}</div>`;
+      bindCards(box);
+      enrich(items, box.querySelector('.hscroll'));
+    } catch { /* row stays skeleton on error */ }
+  };
+  await Promise.all([
+    fill('#row-tm', api('/api/trending?type=movie')),
+    fill('#row-tt', api('/api/trending?type=tv')),
+    fill('#row-up', api('/api/upcoming?type=movie'))
+  ]);
+}
+
 async function renderBrowse(kind) {
   const type = kind === 'series' ? 'tv' : 'movie';
   const f = state.browse[kind];
   const sh = state.shared;
-  // 'seasons' sort only applies to series; movies quietly use popularity
   const effSort = (kind !== 'series' && sh.sort === 'seasons') ? 'popularity' : sh.sort;
-  spinner();
+  view().innerHTML = `<h1 class="page-title">${kind === 'series' ? 'Series' : 'Movies'} <small>loading…</small></h1>${skeletonGrid(14)}`;
+
   if (!state.genres[type].length) {
-    state.genres[type] = await api(`/api/genres?type=${type}`);
+    try { state.genres[type] = await api(`/api/genres?type=${type}`); } catch { /* chips still work */ }
   }
   const data = await api(`/api/browse?type=${type}&service=${sh.service}&genre=${f.genre}&sort=${effSort}&page=${f.page}`);
   const chips = [{ slug: '', name: 'All services' }, ...state.services]
@@ -257,7 +374,7 @@ async function renderBrowse(kind) {
       </div>
     </div>
     ${data.results.length
-      ? `<div class="grid">${data.results.map(cardHTML).join('')}</div>`
+      ? `<div class="grid" id="browse-grid">${data.results.map(cardHTML).join('')}</div>`
       : `<div class="empty"><span class="big">🕳️</span>Nothing matched those filters.</div>`}
     <div class="pager" id="pager">
       <button class="btn-outline" id="pg-prev" ${f.page <= 1 ? 'disabled' : ''}>← Prev</button>
@@ -266,6 +383,9 @@ async function renderBrowse(kind) {
       ${data.totalPages > 1 ? '<button class="btn-outline" id="pg-all">Show all</button>' : ''}
     </div>`;
   bindCards(view());
+  const resort = (effSort === 'rating' || effSort === 'seasons') ? effSort : null;
+  enrich(data.results, $('#browse-grid'), resort);
+
   view().querySelectorAll('.chip').forEach(c => c.addEventListener('click', () => {
     sh.service = c.dataset.svc;
     state.browse.movies.page = state.browse.series.page = 1;
@@ -281,7 +401,7 @@ async function renderBrowse(kind) {
   $('#pg-next').addEventListener('click', () => { f.page++; renderBrowse(kind); window.scrollTo(0, 0); });
   const allBtn = $('#pg-all');
   if (allBtn) allBtn.addEventListener('click', async () => {
-    const MAX_TITLES = 200; // keep the page usable; narrow filters to see deeper
+    const MAX_TITLES = 200;
     allBtn.disabled = true;
     $('#pg-prev').disabled = $('#pg-next').disabled = true;
     let all = [...data.results];
@@ -295,19 +415,19 @@ async function renderBrowse(kind) {
         all = all.concat(more.results);
       }
     } catch { /* show what we have */ }
-    if (effSort === 'rating') all = sortList(all, 'rating');
-    if (effSort === 'seasons') all = sortList(all, 'seasons');
-    const grid = view().querySelector('.grid');
-    if (grid) { grid.innerHTML = all.map(cardHTML).join(''); bindCards(grid); }
+    const grid = $('#browse-grid');
+    if (!grid) return;
+    grid.innerHTML = all.map(cardHTML).join('');
+    bindCards(grid);
     const truncated = page < data.totalPages;
-    $('#pager').innerHTML = `<span>Showing ${all.length} titles${truncated ? ' (first ' + MAX_TITLES + ' — narrow filters to dig deeper)' : ' — that\'s everything'}</span>`;
+    $('#pager').innerHTML = `<span>Showing ${all.length} titles${truncated ? ' (first ' + MAX_TITLES + ' — narrow filters to dig deeper)' : " — that's everything"}</span>`;
+    enrich(all, grid, resort);
     window.scrollTo(0, 0);
   });
 }
 
-// ---------- UPCOMING ----------
 async function renderUpcoming() {
-  spinner();
+  view().innerHTML = `<h1 class="page-title">Coming Soon</h1>${skeletonGrid(14)}`;
   let [movies, series] = await Promise.all([api('/api/upcoming?type=movie'), api('/api/upcoming?type=tv')]);
   movies = sortList(movies, state.upSort);
   series = sortList(series, state.upSort);
@@ -321,15 +441,16 @@ async function renderUpcoming() {
         <option value="title" ${state.upSort === 'title' ? 'selected' : ''}>Sort: A–Z</option>
       </select>
     </div></div>
-    <section class="row"><h2>🎬 Movies</h2><div class="grid">${movies.map(cardHTML).join('') || '<p class="empty">Nothing found.</p>'}</div></section>
-    <section class="row"><h2>📺 Series</h2><div class="grid">${series.map(cardHTML).join('') || '<p class="empty">Nothing found.</p>'}</div></section>`;
+    <section class="row"><h2>🎬 Movies</h2><div class="grid" id="up-movies">${movies.map(cardHTML).join('') || '<p class="empty">Nothing found.</p>'}</div></section>
+    <section class="row"><h2>📺 Series</h2><div class="grid" id="up-series">${series.map(cardHTML).join('') || '<p class="empty">Nothing found.</p>'}</div></section>`;
   bindCards(view());
+  enrich(movies, $('#up-movies'), state.upSort || null);
+  enrich(series, $('#up-series'), state.upSort || null);
   $('#up-sort').addEventListener('change', e => { state.upSort = e.target.value; renderUpcoming(); });
 }
 
-// ---------- SEARCH ----------
 async function renderSearch(q) {
-  spinner();
+  view().innerHTML = `<h1 class="page-title">Results for “${esc(q)}”</h1>${skeletonGrid(10)}`;
   const data = await api(`/api/search?q=${encodeURIComponent(q)}`);
   const movies = sortList(data.results.filter(x => x.mediaType === 'movie'), state.searchSort);
   const series = sortList(data.results.filter(x => x.mediaType === 'tv'), state.searchSort);
@@ -344,21 +465,17 @@ async function renderSearch(q) {
         <option value="title" ${state.searchSort === 'title' ? 'selected' : ''}>Sort: A–Z</option>
       </select>
     </div></div>
-    ${movies.length ? `<section class="row"><h2>🎬 Movies</h2><div class="grid">${movies.map(cardHTML).join('')}</div></section>` : ''}
-    ${series.length ? `<section class="row"><h2>📺 Series</h2><div class="grid">${series.map(cardHTML).join('')}</div></section>` : ''}
+    ${movies.length ? `<section class="row"><h2>🎬 Movies</h2><div class="grid" id="sr-movies">${movies.map(cardHTML).join('')}</div></section>` : ''}
+    ${series.length ? `<section class="row"><h2>📺 Series</h2><div class="grid" id="sr-series">${series.map(cardHTML).join('')}</div></section>` : ''}
     ${!data.results.length ? '<div class="empty"><span class="big">🔍</span>No movies or series matched.</div>' : ''}`;
   bindCards(view());
+  enrich(movies, $('#sr-movies'), state.searchSort || null);
+  enrich(series, $('#sr-series'), state.searchSort || null);
   $('#search-sort').addEventListener('change', e => { state.searchSort = e.target.value; renderSearch(q); });
 }
-$('#search-form').addEventListener('submit', e => {
-  e.preventDefault();
-  const q = $('#search-input').value.trim();
-  if (q) location.hash = `#/search?q=${encodeURIComponent(q)}`;
-});
 
-// ---------- DETAILS ----------
 async function renderTitle(type, id) {
-  spinner();
+  view().innerHTML = skeletonGrid(7);
   const d = await api(`/api/title/${type}/${id}`);
   const key = `${d.mediaType}:${d.id}`;
   const on = state.watchKeys.has(key);
@@ -415,18 +532,26 @@ async function renderTitle(type, id) {
     </div>`;
   $('#d-watch').addEventListener('click', async () => {
     await toggleWatch({ id: d.id, mediaType: d.mediaType, title: d.title, poster: d.poster, rating: d.imdbRating || d.rating, year: d.year, services: d.services, seasons: d.seasons });
-    renderTitle(type, id);
+    if (state.user) renderTitle(type, id);
   });
 }
 
-// ---------- WATCHLIST ----------
 async function renderWatchlist() {
-  spinner();
+  if (state.authKnown && !state.user) {
+    view().innerHTML = `
+      <div class="cta-box">
+        <span class="big">⭐</span>
+        <h2 style="margin:0 0 10px">Your watchlist lives here</h2>
+        <p>Sign in (or create a free account) to star movies and series.<br>Your list syncs to every device you sign in from.</p>
+        <button class="btn-primary" id="wl-signin" style="width:auto;padding:12px 30px">Sign in / Create account</button>
+      </div>`;
+    $('#wl-signin').addEventListener('click', () => openAuth('login'));
+    return;
+  }
+  view().innerHTML = skeletonGrid(8);
   let list = await api('/api/watchlist');
   state.watchKeys = new Set(list.map(x => x.key));
-  // filter by type
   if (state.wlType !== 'all') list = list.filter(x => x.mediaType === state.wlType);
-  // sort
   const sorters = {
     added: (a, b) => new Date(b.addedAt) - new Date(a.addedAt),
     rating: (a, b) => (b.rating || 0) - (a.rating || 0),
@@ -437,7 +562,6 @@ async function renderWatchlist() {
     service: (a, b) => ((a.services || [])[0] || 'zzz').localeCompare((b.services || [])[0] || 'zzz') || (b.rating || 0) - (a.rating || 0)
   };
   list.sort(sorters[state.wlSort] || sorters.added);
-
   const groupByService = state.wlSort === 'service';
   let body;
   if (!list.length) {
@@ -453,7 +577,6 @@ async function renderWatchlist() {
   } else {
     body = `<div class="grid">${list.map(cardHTML).join('')}</div>`;
   }
-
   view().innerHTML = `
     <h1 class="page-title">★ Watchlist <small>${list.length} title${list.length === 1 ? '' : 's'}</small></h1>
     <div class="filterbar">
@@ -480,13 +603,13 @@ async function renderWatchlist() {
   $('#wl-sort').addEventListener('change', e => { state.wlSort = e.target.value; renderWatchlist(); });
 }
 
-// ---------- router ----------
+/* ============================ router + boot ============================ */
+
 function currentRoute() { return location.hash || '#/home'; }
 function setActiveNav(name) {
   document.querySelectorAll('#mainnav a').forEach(a => a.classList.toggle('active', a.dataset.nav === name));
 }
 async function route() {
-  if (!state.user) return;
   const hash = currentRoute();
   try {
     if (hash.startsWith('#/movies')) { setActiveNav('movies'); await renderBrowse('movies'); }
@@ -502,19 +625,19 @@ async function route() {
 }
 window.addEventListener('hashchange', route);
 
-// ---------- boot ----------
 (async function boot() {
-  try { state.services = await api('/api/services'); } catch { state.services = []; }
+  route(); // render immediately — no login wall
+  api('/api/services').then(s => { state.services = s; }).catch(() => {});
   try {
     const { user } = await api('/api/auth/me');
     state.user = user;
   } catch { state.user = null; }
+  state.authKnown = true;
+  refreshHeader();
   if (state.user) {
     await loadWatchlistKeys();
-    showApp();
-    route();
-  } else {
-    setAuthMode('login');
-    showAuth();
+    route(); // re-render with stars filled in
+  } else if (currentRoute().startsWith('#/watchlist')) {
+    route(); // show the sign-in CTA now that auth state is known
   }
 })();

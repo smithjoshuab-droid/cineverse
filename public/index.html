@@ -5,19 +5,50 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <meta name="theme-color" content="#0b0b12">
 <title>CineVerse — movies & series, one watchlist</title>
-<meta name="description" content="Discover movies and TV series across Netflix, Prime Video, Disney+, Max, Hulu, Apple TV+, Peacock and Paramount+. Sort by IMDB rating. One watchlist, every device.">
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎬</text></svg>">
+<meta name="description" content="Discover movies and TV series across Netflix, Prime Video, Disney+, Max, Hulu, Apple TV+, Peacock and Paramount+. Sort by IMDB rating. Free to browse — sign in only to save a watchlist.">
+<link rel="icon" href="/icon-192.png">
+<link rel="apple-touch-icon" href="/icon-192.png">
+<link rel="manifest" href="/manifest.json">
 <link rel="preconnect" href="https://image.tmdb.org">
 <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
 
-<!-- ============ AUTH SCREEN ============ -->
-<div id="auth-screen" class="auth-screen hidden">
-  <div class="auth-card">
+<div id="app">
+  <header class="topbar">
+    <a class="logo logo-sm" href="#/home">CINE<span>VERSE</span></a>
+    <nav class="mainnav" id="mainnav">
+      <a href="#/home" data-nav="home">Discover</a>
+      <a href="#/movies" data-nav="movies">Movies</a>
+      <a href="#/series" data-nav="series">Series</a>
+      <a href="#/upcoming" data-nav="upcoming">Coming Soon</a>
+      <a href="#/watchlist" data-nav="watchlist">★ Watchlist</a>
+    </nav>
+    <form id="search-form" class="searchbox" role="search">
+      <input id="search-input" type="search" placeholder="Search movies &amp; series…" aria-label="Search" autocomplete="off">
+      <div id="suggestions" class="suggestions hidden"></div>
+    </form>
+    <div class="userchip">
+      <span id="user-name" class="hidden"></span>
+      <button id="logout-btn" class="btn-ghost hidden" title="Sign out">Sign out</button>
+      <button id="signin-btn" class="btn-solid btn-signin">Sign in</button>
+    </div>
+  </header>
+
+  <main id="view" class="view"></main>
+
+  <footer class="footer">
+    <p>CineVerse · Data from <a href="https://www.themoviedb.org/" target="_blank" rel="noopener">TMDB</a> — this product uses the TMDB API but is not endorsed or certified by TMDB. Ratings supplemented by OMDb.</p>
+  </footer>
+</div>
+
+<!-- ============ AUTH MODAL (only needed to save a watchlist) ============ -->
+<div id="auth-modal" class="modal-overlay hidden">
+  <div class="auth-card modal-card">
+    <button class="modal-close" id="auth-close" aria-label="Close">✕</button>
     <div class="brand-block">
       <div class="logo">CINE<span>VERSE</span></div>
-      <p class="tagline">Movies &amp; series across every service.<br>One watchlist, any device.</p>
+      <p class="tagline" id="auth-tagline">Sign in to save your watchlist —<br>it syncs to every device.</p>
     </div>
     <form id="auth-form" autocomplete="on">
       <div id="auth-name-row" class="field hidden">
@@ -52,33 +83,6 @@
       <button class="btn-primary" id="rc-done">I've saved it — continue</button>
     </div>
   </div>
-</div>
-
-<!-- ============ APP SHELL ============ -->
-<div id="app" class="hidden">
-  <header class="topbar">
-    <a class="logo logo-sm" href="#/home">CINE<span>VERSE</span></a>
-    <nav class="mainnav" id="mainnav">
-      <a href="#/home" data-nav="home">Discover</a>
-      <a href="#/movies" data-nav="movies">Movies</a>
-      <a href="#/series" data-nav="series">Series</a>
-      <a href="#/upcoming" data-nav="upcoming">Coming Soon</a>
-      <a href="#/watchlist" data-nav="watchlist">★ Watchlist</a>
-    </nav>
-    <form id="search-form" class="searchbox" role="search">
-      <input id="search-input" type="search" placeholder="Search movies &amp; series…" aria-label="Search">
-    </form>
-    <div class="userchip">
-      <span id="user-name"></span>
-      <button id="logout-btn" class="btn-ghost" title="Sign out">Sign out</button>
-    </div>
-  </header>
-
-  <main id="view" class="view"></main>
-
-  <footer class="footer">
-    <p>CineVerse · Data from <a href="https://www.themoviedb.org/" target="_blank" rel="noopener">TMDB</a> — this product uses the TMDB API but is not endorsed or certified by TMDB. Ratings supplemented by OMDb.</p>
-  </footer>
 </div>
 
 <div id="toast" class="toast hidden"></div>
