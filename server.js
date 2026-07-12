@@ -4,11 +4,13 @@ require('dotenv').config();
 const path = require('path');
 const crypto = require('crypto');
 const express = require('express');
+const compression = require('compression');
 const cookieParser = require('cookie-parser');
 const bcrypt = require('bcryptjs');
 
 const tmdb = require('./lib/tmdb');
 const store = require('./lib/store');
+const enrichCache = require('./lib/cache');
 
 if (!process.env.TMDB_API_KEY) {
   console.error('FATAL: TMDB_API_KEY is not set. Copy .env.example to .env and add your key.');
@@ -23,9 +25,13 @@ const OMDB_KEY = process.env.OMDB_API_KEY || '';
 const COOKIE = 'cv_session';
 
 app.set('trust proxy', 1); // Render sits behind a proxy
+app.use(compression());
 app.use(express.json());
 app.use(cookieParser(SECRET));
-app.use(express.static(path.join(__dirname, 'public')));
+app.use(express.static(path.join(__dirname, 'public'), { maxAge: '1h', etag: true }));
+
+// Short shared HTTP cache on public catalog responses
+const catalogCache = (req, res, next) => { res.set('Cache-Control', 'public, max-age=300'); next(); };
 
 // ---- Auth helpers ----------------------------------------------------------
 
@@ -127,44 +133,34 @@ app.get('/api/services', (req, res) => {
   res.json(Object.entries(tmdb.SERVICES).map(([slug, s]) => ({ slug, name: s.name })));
 });
 
-app.get('/api/genres', wrap(async (req, res) => {
+app.get('/api/genres', catalogCache, wrap(async (req, res) => {
   const type = req.query.type === 'tv' ? 'tv' : 'movie';
   res.json(await tmdb.getGenres(type));
 }));
 
-app.get('/api/browse', wrap(async (req, res) => {
+app.get('/api/browse', catalogCache, wrap(async (req, res) => {
   const { type = 'movie', service = '', genre = '', sort = 'popularity', page = 1 } = req.query;
-  const data = await tmdb.discover({
+  res.json(await tmdb.discover({
     type: type === 'tv' ? 'tv' : 'movie',
-    service, genre, sort,
+    service, genre, sort: sort === 'seasons' ? 'popularity' : sort,
     page: Math.max(1, parseInt(page, 10) || 1)
-  });
-  await enrichWithImdb(data.results);
-  if (sort === 'rating') {
-    data.results.sort((a, b) => (b.imdbRating ?? b.rating ?? 0) - (a.imdbRating ?? a.rating ?? 0));
-  }
-  if (sort === 'seasons') {
-    data.results.sort((a, b) => (b.seasons || 0) - (a.seasons || 0));
-  }
-  res.json(data);
+  }));
 }));
 
-app.get('/api/trending', wrap(async (req, res) => {
+app.get('/api/trending', catalogCache, wrap(async (req, res) => {
   const type = ['movie', 'tv', 'all'].includes(req.query.type) ? req.query.type : 'all';
-  res.json(await enrichWithImdb(await tmdb.trending(type)));
+  res.json(await tmdb.trending(type));
 }));
 
-app.get('/api/upcoming', wrap(async (req, res) => {
+app.get('/api/upcoming', catalogCache, wrap(async (req, res) => {
   const type = req.query.type === 'tv' ? 'tv' : 'movie';
-  res.json(await enrichWithImdb(await tmdb.upcoming(type)));
+  res.json(await tmdb.upcoming(type));
 }));
 
-app.get('/api/search', wrap(async (req, res) => {
+app.get('/api/search', catalogCache, wrap(async (req, res) => {
   const q = String(req.query.q || '').trim();
   if (!q) return res.json({ results: [] });
-  const data = await tmdb.search(q, parseInt(req.query.page, 10) || 1);
-  await enrichWithImdb(data.results);
-  res.json(data);
+  res.json(await tmdb.search(q, parseInt(req.query.page, 10) || 1));
 }));
 
 // IMDb rating via OMDb (cached 24h; quota-friendly), falls back to null.
@@ -185,33 +181,47 @@ async function imdbRating(imdbId) {
   } catch { return null; }
 }
 
-// Attach streaming services, season counts (TV), and real IMDb ratings to a list of titles.
-async function enrichItems(items) {
-  if (!Array.isArray(items) || !items.length) return items;
-  const CHUNK = 8;
-  for (let i = 0; i < items.length; i += CHUNK) {
-    await Promise.all(items.slice(i, i + CHUNK).map(async item => {
-      const jobs = [
-        tmdb.providers(item.mediaType, item.id).then(svcs => { item.services = svcs; }).catch(() => { item.services = []; })
-      ];
-      if (item.mediaType === 'tv') {
-        jobs.push(tmdb.tvBasics(item.id).then(b => { if (b.seasons) item.seasons = b.seasons; }).catch(() => {}));
-      }
-      if (OMDB_KEY) {
-        jobs.push((async () => {
-          const imdbId = await tmdb.imdbIdFor(item.mediaType, item.id);
-          const imdb = await imdbRating(imdbId);
-          if (imdb && imdb.rating) item.imdbRating = imdb.rating;
-        })().catch(() => {}));
-      }
-      await Promise.all(jobs);
+// Enrichment for one title (streaming services, seasons, real IMDb rating) — cached 24h,
+// persisted to Postgres when available so cold starts stay fast.
+async function enrichOne(mediaType, id) {
+  const key = `${mediaType}:${id}`;
+  const hit = await enrichCache.get(key);
+  if (hit) return hit;
+  const out = { services: [] };
+  const jobs = [
+    tmdb.providers(mediaType, id).then(svcs => { out.services = svcs; }).catch(() => {})
+  ];
+  if (mediaType === 'tv') {
+    jobs.push(tmdb.tvBasics(id).then(b => { if (b.seasons) out.seasons = b.seasons; }).catch(() => {}));
+  }
+  if (OMDB_KEY) {
+    jobs.push((async () => {
+      const imdbId = await tmdb.imdbIdFor(mediaType, id);
+      const imdb = await imdbRating(imdbId);
+      if (imdb && imdb.rating) out.imdbRating = imdb.rating;
+    })().catch(() => {}));
+  }
+  await Promise.all(jobs);
+  enrichCache.set(key, out);
+  return out;
+}
+
+// Batch enrichment — the frontend renders lists instantly, then patches these in.
+app.post('/api/enrich', wrap(async (req, res) => {
+  const keys = (Array.isArray((req.body || {}).keys) ? req.body.keys : []).slice(0, 60);
+  const out = {};
+  const CHUNK = 10;
+  for (let i = 0; i < keys.length; i += CHUNK) {
+    await Promise.all(keys.slice(i, i + CHUNK).map(async k => {
+      const [type, id] = String(k).split(':');
+      if (!['movie', 'tv'].includes(type) || !/^\d+$/.test(id || '')) return;
+      out[k] = await enrichOne(type, Number(id));
     }));
   }
-  return items;
-}
-const enrichWithImdb = enrichItems; // back-compat alias
+  res.json(out);
+}));
 
-app.get('/api/title/:type/:id', wrap(async (req, res) => {
+app.get('/api/title/:type/:id', catalogCache, wrap(async (req, res) => {
   const type = req.params.type === 'tv' ? 'tv' : 'movie';
   const d = await tmdb.details(type, req.params.id);
   const imdb = await imdbRating(d.imdbId);
@@ -229,8 +239,10 @@ app.post('/api/watchlist', requireAuth, wrap(async (req, res) => {
   const { id, mediaType, title, poster, rating, year, seasons } = req.body || {};
   let { services } = req.body || {};
   if (!id || !['movie', 'tv'].includes(mediaType)) return res.status(400).json({ error: 'id and mediaType required' });
-  if (!Array.isArray(services) || !services.length) {
-    services = await tmdb.providers(mediaType, id); // so the watchlist can sort/group by service
+  let extra = {};
+  if (!Array.isArray(services) || !services.length || (mediaType === 'tv' && !seasons)) {
+    extra = await enrichOne(mediaType, id); // cached — so the watchlist can sort/group by service
+    if (!Array.isArray(services) || !services.length) services = extra.services || [];
   }
   res.json(await store.addToWatchlist(req.user.id, {
     id, mediaType,
@@ -238,7 +250,7 @@ app.post('/api/watchlist', requireAuth, wrap(async (req, res) => {
     poster: poster || null,
     rating: Number(rating) || 0,
     year: String(year || ''),
-    seasons: Number(seasons) || null,
+    seasons: Number(seasons) || extra.seasons || null,
     services: Array.isArray(services) ? services : []
   }));
 }));
